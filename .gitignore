@@ -1,0 +1,88 @@
+# =======================================
+# OS
+# =======================================
+.DS_Store
+Thumbs.db
+
+# =======================================
+# Python (Executor)
+# =======================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+*.egg
+*.log
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# Build / packaging
+build/
+dist/
+*.spec
+
+# Coverage / testing
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# =======================================
+# Node / React / Electron (Cortex frontend/backend)
+# =======================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build output
+build/
+dist/
+.cache/
+.next/
+out/
+.expo/
+.expo-shared/
+
+# Logs
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# Env files
+.env
+.env.*.local
+
+# =======================================
+# IDEs & Editors
+# =======================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.swm
+
+# =======================================
+# Misc
+# =======================================
+*.bak
+*.tmp
+*.temp
+*.orig
+*.rej
