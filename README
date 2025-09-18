@@ -1,0 +1,29 @@
+# Cortex
+
+Cortex is a consumer-facing executive functioning manager app.  
+This repo contains the **Cortex app** (frontend/backend) and the **Executor** AI worker module.
+
+## Structure
+- `frontend/` – React/Electron/React Native app (future)
+- `backend/` – API services (future)
+- `executor/` – AI automation middleware + plugins
+
+## Executor Overview
+Executor is the task engine that powers automation for Cortex.
+It runs in Google Cloud Run, uses Artifact Registry for container images, and connects to:
+- Google Drive & Sheets
+- Telegram (approvals + alerts)
+- OpenAI API
+
+## Plugins
+- **Phalanx** – trading bot simulation + sentiment ingestion
+- **BizOps** – business automation, P&L reporting
+- **Cortex** – internal app integration tasks
+
+## Getting Started
+1. Clone this repo.
+2. Copy `.env.template` to `.env` and fill in real values.
+3. Run locally with Docker:
+
+   ```bash
+   docker-compose up --build
