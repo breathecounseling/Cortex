@@ -1,0 +1,8 @@
+version: '3.9'
+services:
+  executor:
+    build: ./executor
+    env_file: ./executor/.env
+    volumes:
+      - ./executor:/app/executor
+    restart: unless-stopped
