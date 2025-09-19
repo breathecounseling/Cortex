@@ -55,12 +55,18 @@ def test_run():
 ''')
 
     # --- Test + Patch Loop ---
+    from executor.connectors import openai_client
+    
+    ...
+    
     passed, output = iterative_patch(
         safe_name,
         main_file,
         test_file,
-        openai_client.ask_executor,   # ✅ inject ask_executor here
+        openai_client.ask_executor,   # ✅ inject ask_executor
         max_retries=max_retries
+    )
+
     )
 
     # --- Commit ---
