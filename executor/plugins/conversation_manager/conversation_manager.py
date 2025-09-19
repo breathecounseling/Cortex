@@ -1549,6 +1549,7 @@ class FileStore:
             if cnt % self.compact_every == 0:
                 # Periodic compaction: rewrite a normalized file (no functional change)
                 self._compact_locked(path)
+
         return rec
 
     def _compact_locked(self, path: str) -> None:
@@ -2210,18 +2211,106 @@ def _render_history_lines(turns: _t.List[dict]) -> str:
     rendered_items = "\n\n".join(lines).strip()
     return f"Conversation history:\n\n{rendered_items}"
 
+# -------------------------
+# New helpers for GPT-5 compliant formatting
+# -------------------------
 
-def handle_repl_turn(conversation_id: str, user_input: str, max_turns: int = 10) -> _t.List[dict]:
+def _ensure_plain_string(x: _t.Any) -> str:
+    try:
+        if x is None:
+            return ""
+        if isinstance(x, str):
+            return x
+        return str(x)
+    except Exception:
+        return ""
+
+def _normalize_history_entries(history: _t.Any) -> _t.List[dict]:
     """
-    Build GPT-5 input messages for a REPL turn:
-      - Single system message labeled 'Conversation history' containing the last up to max_turns turns
-        as '<role>: <content>' lines, separated by blank lines.
-      - Followed by the current user message.
-      - Persist only the user message to history (not the system message).
+    Coerce arbitrary history-like input to a clean list of {role, content} dicts.
+    Only user and assistant roles are retained here for formatting.
     """
-    # Validate and normalize inputs
-    cid = str(conversation_id or "default")
-    ui = "" if user_input is None else str(user_input)
+    out: list[dict] = []
+    if not isinstance(history, (list, tuple)):
+        return out
+    for m in history:
+        if not isinstance(m, dict):
+            continue
+        role_raw = (m.get("role") or "").strip().lower()
+        if role_raw not in ("user", "assistant"):
+            continue
+        content = _ensure_plain_string(m.get("content"))
+        out.append({"role": role_raw, "content": content})
+    return out
+
+def _format_history_for_system_message(history: _t.List[dict], limit: int = 10) -> str:
+    """
+    Build system message content:
+    'Conversation history:\n' + lines, each line 'User: <content>' or 'Assistant: <content>',
+    using the most recent 'limit' turns in oldest-to-newest order.
+    """
+    normalized = _normalize_history_entries(history)
+    if limit > 0 and len(normalized) > limit:
+        normalized = normalized[-limit:]
+    lines: list[str] = []
+    for m in normalized:
+        role_label = "User" if m.get("role") == "user" else "Assistant"
+        lines.append(f"{role_label}: { _ensure_plain_string(m.get('content')) }")
+    return "Conversation history:\n" + "\n".join(lines)
+
+# -------------------------
+# Updated handle_repl_turn (dual-signature for compatibility)
+# -------------------------
+
+def handle_repl_turn(currentUserInput: _t.Any, history: _t.Any = None, max_turns: int = 10, **kwargs):
+    """
+    Dual-mode API:
+
+    New GPT-5-compliant signature:
+      handle_repl_turn(currentUserInput: str, history: list[{role:'user'|'assistant', content:str}])
+      -> { messages: [{role, content}], updatedHistory: [{role, content}] }
+
+    - Builds a single system message summarizing the most recent 10 user/assistant turns,
+      oldest-to-newest, with lines 'User: ...' or 'Assistant: ...'.
+    - Returns messages = [system, currentUser], and updatedHistory with the current user turn appended.
+    - Never saves/persists the system message.
+
+    Back-compat legacy signature (preserved):
+      handle_repl_turn(conversation_id: str, user_input: str, max_turns: int = 10) -> list[{role, content, name?}]
+      Behavior unchanged: persists only the user message to internal store and returns a messages list.
+    """
+    # Detect call shape:
+    # New-mode if 'history' is a list (or kwarg 'history' provided as list), else legacy.
+    is_new_mode = isinstance(history, (list, tuple))
+    # Also support keyword-based calls explicitly indicating new shape
+    if not is_new_mode and ("history" in kwargs) and isinstance(kwargs.get("history"), (list, tuple)):
+        history = kwargs.get("history")
+        is_new_mode = True
+        # currentUserInput might be provided via kw too
+        if kwargs.get("currentUserInput") is not None:
+            currentUserInput = kwargs.get("currentUserInput")
+
+    if is_new_mode:
+        # New GPT-5-compliant behavior
+        current_user_text = _ensure_plain_string(currentUserInput)
+        prior = _normalize_history_entries(history)
+        system_content = _format_history_for_system_message(prior, limit=10)
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": current_user_text},
+        ]
+        updated_history = list(prior) + [{"role": "user", "content": current_user_text}]
+        # Include any additional metadata passthrough if present in kwargs (additive behavior)
+        extra = {}
+        for k in ("conversation_id", "session_id", "meta", "metadata"):
+            if k in kwargs:
+                extra[k] = kwargs[k]
+        return {"messages": messages, "updatedHistory": updated_history, **extra}
+
+    # Legacy behavior (backward compatible)
+    # Map parameters to legacy names
+    conversation_id = str(currentUserInput or "default")
+    user_input = "" if history is None else str(history)
     try:
         n = int(max_turns)
     except Exception:
@@ -2229,16 +2318,16 @@ def handle_repl_turn(conversation_id: str, user_input: str, max_turns: int = 10)
     if n <= 0:
         n = 10
 
-    # 1) Fetch existing conversation history via convenience getters; fallback to JSONL if empty
+    # Fetch existing conversation history
     try:
-        history_items = get_turns(cid)
+        history_items = get_turns(conversation_id)
     except Exception:
         history_items = []
 
     if not history_items:
-        # Fallback to JSONL-based history (input/output) if available
+        # Fallback to JSONL-based history (input/output)
         try:
-            recs = get_recent_messages(n=n, session_id=cid, include_types={"input", "output"})
+            recs = get_recent_messages(n=n, session_id=conversation_id, include_types={"input", "output"})
             tmp: list[dict] = []
             for r in recs:
                 role = _infer_role(r)
@@ -2248,31 +2337,31 @@ def handle_repl_turn(conversation_id: str, user_input: str, max_turns: int = 10)
         except Exception:
             history_items = []
 
-    # 2) Select most recent up to max_turns, preserving chronological order
-    selected = history_items[-n:] if n > 0 and len(history_items) > n else list(history_items)
+    # Filter only user/assistant for the system message and select last n (<=10 by default)
+    filtered = [m for m in history_items if str(m.get("role") or "").lower() in ("user", "assistant")]
+    selected = filtered[-min(n, 10):] if filtered else []
+    system_content = _format_history_for_system_message(selected, limit=min(n, 10))
 
-    # 3) Render single system message content
-    rendered_history = _render_history_lines(selected)
-
-    # 4) Create final messages list
-    sys_msg = {"role": "system", "content": rendered_history, "name": "Conversation history"}
-    user_msg = {"role": "user", "content": ui}
+    # Build messages (preserve legacy 'name' field for system)
+    sys_msg = {"role": "system", "content": system_content, "name": "Conversation history"}
+    user_msg = {"role": "user", "content": user_input}
     messages = [sys_msg, user_msg]
 
-    # 5) Persist only the user message
+    # Persist only user message
     try:
-        add_turn(cid, role="user", content=ui)
+        add_turn(conversation_id, role="user", content=user_input)
     except Exception as e:
-        _debug(f"[conversation_manager] add_turn failed in handle_repl_turn: {e}")
+        _debug(f"[conversation_manager] add_turn failed in legacy handle_repl_turn: {e}")
 
-    # 6) Validation: ensure non-empty and each item has role+content
-    if not messages:
-        messages = [{"role": "user", "content": ui}]
+    # Normalize and return as legacy list
     normalized: list[dict] = []
     for m in messages:
         role = (m.get("role") or "user")
         content = "" if m.get("content") is None else str(m.get("content"))
-        normalized.append({"role": role, "content": content, **({"name": m.get("name")} if m.get("name") else {})})
+        if "name" in m and m.get("name"):
+            normalized.append({"role": role, "content": content, "name": m.get("name")})
+        else:
+            normalized.append({"role": role, "content": content})
     return normalized
 
 
