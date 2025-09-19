@@ -2107,6 +2107,187 @@ def run():
     }
 
 
+# -------------------------
+# New: handle_repl_turn injection for GPT-5
+# -------------------------
+
+def _get(obj: _t.Any, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    try:
+        return getattr(obj, key)
+    except Exception:
+        return default
+
+def _as_messages(source: _t.Any) -> _t.List[dict]:
+    if not source:
+        return []
+    if isinstance(source, (list, tuple)):
+        # Already a messages-like structure
+        out: list[dict] = []
+        for m in source:
+            if not isinstance(m, dict):
+                continue
+            role = (m.get("role") or "user").strip().lower()
+            content = "" if m.get("content") is None else str(m.get("content"))
+            name = m.get("name")
+            out.append({"role": role, "content": content, **({"name": name} if name else {})})
+        return out
+    return []
+
+def _is_gpt5(model: _t.Optional[str]) -> bool:
+    if not model:
+        return False
+    m = str(model).strip().lower()
+    return "gpt-5" in m or m.startswith("gpt5") or m == "gpt-5"
+
+def _trim_tokens(text: str, max_tokens: int) -> str:
+    return _trim_to_token_budget(text or "", max_tokens)
+
+def _collect_prior_messages_for_context(
+    current_messages: _t.List[dict],
+    user_input: str,
+    limit: int = 10
+) -> _t.List[dict]:
+    """
+    Collect last up to 'limit' prior non-system, non-tool messages in chronological order,
+    excluding the final user message equal to 'user_input'.
+    """
+    if not current_messages:
+        return []
+    # Exclude system/tool messages, and exclude the last user msg that matches user_input
+    filtered = [m for m in current_messages if (m.get("role") not in ("system", "tool"))]
+    # If the last message is user and equals user_input, drop it from prior
+    if filtered:
+        last = filtered[-1]
+        if (last.get("role") == "user") and (str(last.get("content") or "").strip() == str(user_input or "").strip()):
+            filtered = filtered[:-1]
+    # Keep last 'limit'
+    if limit > 0 and len(filtered) > limit:
+        filtered = filtered[-limit:]
+    return filtered
+
+def handle_repl_turn(request: dict, state: _t.Optional[_t.Any] = None, conversation: _t.Optional[_t.Any] = None) -> dict:
+    """
+    Inject a system message named 'Conversation history' into the request when targeting GPT-5.
+    Behavior:
+      1) Determine history payload: prefer a running summary (state.summary or conversation.getSummary()).
+         Otherwise collect last up to 10 prior messages (chronological, excluding system/tool and plugin-added messages).
+      2) Build system message content as:
+         - 'Summary of prior conversation:\\n{summary}\\n\\nNew user input:\\n{user_input}'
+           OR
+         - 'Recent conversation (last {N} messages):\\n{formatted_messages}\\n\\nNew user input:\\n{user_input}'
+           where formatted_messages are lines like '{role}: {content}'.
+      3) For GPT-5, set messages = [system message, current user message], do not forward raw prior turns.
+      4) If no history exists, still create the system message with just the new input.
+      5) Non-GPT-5 requests are returned unchanged.
+      6) Ensure token-safety by truncating fields to budgets already used by the plugin where applicable.
+    """
+    try:
+        req = dict(request or {})
+    except Exception:
+        req = {} if request is None else request
+
+    model = _get(req, "model") or _get(req, "model_id") or _get(req, "modelId") or _get(state, "model") or _get(state, "model_id")
+    if not _is_gpt5(model):
+        return req  # Keep existing behavior for non-GPT-5 models
+
+    # Extract user input
+    user_input = _get(req, "user_input") or _get(state, "user_input") or _get(req, "prompt") or _get(state, "prompt")
+    # If not present, try to take from the last user message in messages
+    existing_messages = _as_messages(_get(req, "messages")) or _as_messages(_get(state, "messages"))
+    if not user_input:
+        for m in reversed(existing_messages or []):
+            if (m.get("role") == "user") and (m.get("content") is not None):
+                user_input = m.get("content")
+                break
+    user_input = "" if user_input is None else str(user_input)
+
+    # Determine running summary if available
+    running_summary = None
+    s = _get(state, "summary")
+    if s:
+        running_summary = str(s)
+    elif conversation is not None:
+        try:
+            getter = getattr(conversation, "getSummary", None)
+            if callable(getter):
+                rs = getter()
+                if rs:
+                    running_summary = str(rs)
+        except Exception:
+            pass
+
+    # Token budgets
+    max_user_tokens = min(512, CONV_MGR_MAX_HISTORY_TOKENS // 4)  # reasonable per-field cap
+    max_summary_tokens = int(_summarization_config.get("max_tokens_detailed", 600))  # reuse plugin config
+    max_line_tokens = 128  # per message line cap
+
+    # Truncate user input field
+    user_input_trim = _trim_tokens(user_input, max_user_tokens)
+
+    system_content = ""
+    if running_summary:
+        summary_trim = _trim_tokens(str(running_summary), max_summary_tokens)
+        system_content = f"Summary of prior conversation:\n{summary_trim}\n\nNew user input:\n{user_input_trim}"
+    else:
+        # Collect last up to 10 prior messages
+        prior_msgs = _collect_prior_messages_for_context(existing_messages, user_input_trim, limit=10)
+        # If still empty, attempt to use persisted REPL history logs as a fallback
+        if not prior_msgs:
+            # Try to derive a session key/id for filtering
+            sid = _get(req, "session_id") or _get(state, "session_id") or _get(req, "sessionId") or _get(state, "sessionId") or None
+            try:
+                # Prefer only input/output types
+                recs = get_recent_messages(n=10, session_id=sid, include_types={"input", "output"})
+                tmp_msgs: list[dict] = []
+                for r in recs:
+                    role = "user" if str(r.get("type")).lower() == "input" else "assistant"
+                    tmp_msgs.append({"role": role, "content": str(r.get("text") or "")})
+                # Exclude last if it's equivalent to current user input
+                if tmp_msgs:
+                    last = tmp_msgs[-1]
+                    if last.get("role") == "user" and (last.get("content") or "").strip() == user_input_trim.strip():
+                        tmp_msgs = tmp_msgs[:-1]
+                prior_msgs = tmp_msgs[-10:]
+            except Exception:
+                prior_msgs = []
+
+        # Build formatted lines
+        if prior_msgs:
+            formatted_lines: list[str] = []
+            for m in prior_msgs:
+                role = (m.get("role") or "user").strip().lower()
+                content = "" if m.get("content") is None else str(m.get("content"))
+                content = _trim_tokens(content, max_line_tokens)
+                formatted_lines.append(f"{role}: {content}")
+            formatted = "\n".join(formatted_lines).strip()
+            system_content = f"Recent conversation (last {len(prior_msgs)} messages):\n{formatted}\n\nNew user input:\n{user_input_trim}"
+        else:
+            # Fallback: no history at all
+            system_content = f"New user input:\n{user_input_trim}"
+
+    # Construct the messages array for GPT-5
+    sys_msg = {
+        "role": "system",
+        "name": "Conversation history",
+        "content": system_content,
+    }
+    user_msg = {
+        "role": "user",
+        "content": user_input_trim,
+    }
+    req["messages"] = [sys_msg, user_msg]
+    # Do not forward raw prior turns to GPT-5 (avoid duplication)
+    # Remove prompt if present to avoid conflicting inputs
+    if "prompt" in req:
+        try:
+            del req["prompt"]
+        except Exception:
+            pass
+    return req
+
+
 __all__ = [
     "run",
     "get_log_enabled",
@@ -2147,4 +2328,6 @@ __all__ = [
     "installWithAskExecutor",
     "wrapAsk",
     "resolveSessionKey",
+    # New API
+    "handle_repl_turn",
 ]
