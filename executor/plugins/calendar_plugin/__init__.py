@@ -1,1 +1,1 @@
-""" calendar plugin """
+""" calendar_plugin plugin """
