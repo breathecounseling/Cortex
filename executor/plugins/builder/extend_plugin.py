@@ -1,7 +1,5 @@
 """
-Extend Plugin
-Allows Executor to modify or expand existing plugins with new features.
-Runs pytest before auto-committing to dev branch.
+Extend Plugin with Autotester + Patcher + Git Integration
 """
 
 import os
@@ -20,7 +18,6 @@ def run_pytest(test_file: str):
             text=True,
             check=True
         )
-
         return True, result.stdout
     except subprocess.CalledProcessError as e:
         return False, e.stdout + "\n" + e.stderr
@@ -39,11 +36,30 @@ def git_commit_push(plugin_name: str, branch: str = "dev"):
     except subprocess.CalledProcessError:
         return False
 
-def extend_plugin(plugin_name: str, new_feature: str, test_code: str = ""):
+def request_patch(plugin_name: str, code: str, test_code: str, error_log: str):
+    """Ask GPT-5 to patch code based on failing tests."""
+    prompt = f"""
+A plugin named {plugin_name} was extended but failed its tests.
+Here is the full plugin code:
+{code}
+
+Here is the test code:
+{test_code}
+
+Here is the pytest error log:
+{error_log}
+
+Fix ONLY what is necessary to make the tests pass.
+Do not remove working functions or unrelated logic.
+Return the FULL corrected plugin code.
+    """
+    response = openai_client.ask_executor(prompt)
+    return response.get("response_text", "")
+
+def extend_plugin(plugin_name: str, new_feature: str, test_code: str = "", max_retries: int = 3):
     """
     Ask GPT-5 to extend an existing plugin with a new feature.
-    Runs pytest on existing or provided tests.
-    Auto-commits to dev branch only if tests pass.
+    Run pytest and patch automatically until tests pass or retries exhausted.
     """
     safe_name = plugin_name.lower().replace(" ", "_")
     plugin_dir = os.path.join(PLUGIN_BASE, safe_name)
@@ -58,57 +74,69 @@ def extend_plugin(plugin_name: str, new_feature: str, test_code: str = ""):
     shutil.copy(main_file, backup_path)
 
     with open(main_file, "r", encoding="utf-8") as f:
-        code = f.read()
+        old_code = f.read()
 
     prompt = f"""
-A plugin named {safe_name} needs to be extended with this feature:
+Extend the plugin named {safe_name} with this feature:
 {new_feature}
 
 Here is the current plugin code:
-{code}
+{old_code}
 
 If tests are provided, ensure the code satisfies them:
 {test_code}
 
-Provide ONLY the full corrected plugin code for {safe_name}.
-Do not remove existing working functions unless they must change.
+Return ONLY the full corrected plugin code.
+Do not remove existing working functions unless necessary.
     """
 
     response = openai_client.ask_executor(prompt)
     new_code = response.get("response_text", "")
 
     if not new_code.strip():
-        return {
-            "status": "error",
-            "message": f"No new code generated for plugin '{safe_name}'. Rolled back."
-        }
+        return {"status": "error", "message": "No new code generated, rolled back."}
 
     # Write new code
     with open(main_file, "w", encoding="utf-8") as f:
         f.write(new_code)
 
-    # --- Run pytest ---
-    if os.path.exists(test_file):
-        passed, output = run_pytest(test_file)
-    else:
-        passed, output = True, "No tests found, skipping pytest."
+    # --- Run pytest + patch loop ---
+    retries = 0
+    passed, output = run_pytest(test_file) if os.path.exists(test_file) else (True, "No tests found, skipping pytest.")
+
+    while not passed and retries < max_retries:
+        retries += 1
+        with open(main_file, "r", encoding="utf-8") as f:
+            code = f.read()
+        test_code_content = ""
+        if os.path.exists(test_file):
+            with open(test_file, "r", encoding="utf-8") as f:
+                test_code_content = f.read()
+
+        patched_code = request_patch(safe_name, code, test_code_content, output)
+
+        if patched_code.strip():
+            with open(main_file, "w", encoding="utf-8") as f:
+                f.write(patched_code)
+            passed, output = run_pytest(test_file)
+        else:
+            break
 
     if passed:
         success = git_commit_push(safe_name, branch="dev")
         return {
             "status": "ok",
-            "message": f"Plugin '{safe_name}' extended with feature: {new_feature}",
+            "message": f"Plugin '{safe_name}' extended and passed tests.",
             "test_output": output,
             "git_pushed": success
         }
     else:
-        # Roll back if tests fail
         shutil.move(backup_path, main_file)
         return {
             "status": "error",
-            "message": f"Extension failed tests for plugin '{safe_name}'. Rolled back.",
+            "message": f"Extension failed after {max_retries} retries. Rolled back.",
             "test_output": output
         }
 
 if __name__ == "__main__":
-    print(extend_plugin("calendar", "Add function to list upcoming events"))
+    print(extend_plugin("calendar_plugin", "Add function to list upcoming events"))
