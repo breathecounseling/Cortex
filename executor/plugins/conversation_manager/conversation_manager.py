@@ -724,7 +724,7 @@ def _extractive_summarize(context_text: str, max_tokens_short: int, max_tokens_d
                 used += t
             if used >= max_tokens:
                 break
-        summary = " ".join(parts).strip()
+        summary = " " .join(parts).strip()
         # Ensure within budget
         summary = _trim_to_token_budget(summary, max_tokens)
         return summary
@@ -2108,7 +2108,7 @@ def run():
 
 
 # -------------------------
-# New: handle_repl_turn injection for GPT-5
+# New: handle_repl_turn and helpers for GPT-5
 # -------------------------
 
 def _get(obj: _t.Any, key: str, default=None):
@@ -2167,125 +2167,113 @@ def _collect_prior_messages_for_context(
         filtered = filtered[-limit:]
     return filtered
 
-def handle_repl_turn(request: dict, state: _t.Optional[_t.Any] = None, conversation: _t.Optional[_t.Any] = None) -> dict:
+# -------------------------
+# Convenience turn APIs (storage reuse)
+# -------------------------
+
+# Default conversation manager instance for convenience add/get turns
+_default_cm = ConversationManager({})
+
+def add_turn(conversation_id: str, role: str, content: str, metadata: _t.Optional[dict] = None) -> dict:
     """
-    Inject a system message named 'Conversation history' into the request when targeting GPT-5.
-    Behavior:
-      1) Determine history payload: prefer a running summary (state.summary or conversation.getSummary()).
-         Otherwise collect last up to 10 prior messages (chronological, excluding system/tool and plugin-added messages).
-      2) Build system message content as:
-         - 'Summary of prior conversation:\\n{summary}\\n\\nNew user input:\\n{user_input}'
-           OR
-         - 'Recent conversation (last {N} messages):\\n{formatted_messages}\\n\\nNew user input:\\n{user_input}'
-           where formatted_messages are lines like '{role}: {content}'.
-      3) For GPT-5, set messages = [system message, current user message], do not forward raw prior turns.
-      4) If no history exists, still create the system message with just the new input.
-      5) Non-GPT-5 requests are returned unchanged.
-      6) Ensure token-safety by truncating fields to budgets already used by the plugin where applicable.
+    Append a turn to the conversation history, reusing internal storage.
+    Supports roles: user, assistant, system (system stored as a generic message).
     """
+    sk = str(conversation_id or "default")
+    _default_cm.getOrCreateSession(sk)
+    r = (role or "user").strip().lower()
+    if r == "user":
+        return _default_cm.recordUser(sk, content, metadata or {})
+    if r == "assistant":
+        return _default_cm.recordAssistant(sk, content, {"metadata": metadata or {}})
+    # Store system or other roles directly
+    msg = _build_message(r, "" if content is None else str(content), metadata or {}, thread_id=_default_cm._current_thread(sk))
+    return _default_cm.store.append(sk, msg)
+
+def get_turns(conversation_id: str) -> _t.List[dict]:
+    """
+    Return full list of stored turns for the active thread in this conversation.
+    """
+    sk = str(conversation_id or "default")
+    _default_cm.getOrCreateSession(sk)
+    return _default_cm._messages_for_thread(sk)
+
+def _render_history_lines(turns: _t.List[dict]) -> str:
+    if not turns:
+        return "Conversation history:\n\n(none)"
+    lines: list[str] = []
+    for t in turns:
+        role = str(t.get("role") or "user")
+        content = "" if t.get("content") is None else str(t.get("content"))
+        lines.append(f"{role}: {content}")
+    # Blank line between items
+    rendered_items = "\n\n".join(lines).strip()
+    return f"Conversation history:\n\n{rendered_items}"
+
+
+def handle_repl_turn(conversation_id: str, user_input: str, max_turns: int = 10) -> _t.List[dict]:
+    """
+    Build GPT-5 input messages for a REPL turn:
+      - Single system message labeled 'Conversation history' containing the last up to max_turns turns
+        as '<role>: <content>' lines, separated by blank lines.
+      - Followed by the current user message.
+      - Persist only the user message to history (not the system message).
+    """
+    # Validate and normalize inputs
+    cid = str(conversation_id or "default")
+    ui = "" if user_input is None else str(user_input)
     try:
-        req = dict(request or {})
+        n = int(max_turns)
     except Exception:
-        req = {} if request is None else request
+        n = 10
+    if n <= 0:
+        n = 10
 
-    model = _get(req, "model") or _get(req, "model_id") or _get(req, "modelId") or _get(state, "model") or _get(state, "model_id")
-    if not _is_gpt5(model):
-        return req  # Keep existing behavior for non-GPT-5 models
+    # 1) Fetch existing conversation history via convenience getters; fallback to JSONL if empty
+    try:
+        history_items = get_turns(cid)
+    except Exception:
+        history_items = []
 
-    # Extract user input
-    user_input = _get(req, "user_input") or _get(state, "user_input") or _get(req, "prompt") or _get(state, "prompt")
-    # If not present, try to take from the last user message in messages
-    existing_messages = _as_messages(_get(req, "messages")) or _as_messages(_get(state, "messages"))
-    if not user_input:
-        for m in reversed(existing_messages or []):
-            if (m.get("role") == "user") and (m.get("content") is not None):
-                user_input = m.get("content")
-                break
-    user_input = "" if user_input is None else str(user_input)
-
-    # Determine running summary if available
-    running_summary = None
-    s = _get(state, "summary")
-    if s:
-        running_summary = str(s)
-    elif conversation is not None:
+    if not history_items:
+        # Fallback to JSONL-based history (input/output) if available
         try:
-            getter = getattr(conversation, "getSummary", None)
-            if callable(getter):
-                rs = getter()
-                if rs:
-                    running_summary = str(rs)
+            recs = get_recent_messages(n=n, session_id=cid, include_types={"input", "output"})
+            tmp: list[dict] = []
+            for r in recs:
+                role = _infer_role(r)
+                content = "" if r.get("text") is None else str(r.get("text"))
+                tmp.append({"role": role, "content": content})
+            history_items = tmp
         except Exception:
-            pass
+            history_items = []
 
-    # Token budgets
-    max_user_tokens = min(512, CONV_MGR_MAX_HISTORY_TOKENS // 4)  # reasonable per-field cap
-    max_summary_tokens = int(_summarization_config.get("max_tokens_detailed", 600))  # reuse plugin config
-    max_line_tokens = 128  # per message line cap
+    # 2) Select most recent up to max_turns, preserving chronological order
+    selected = history_items[-n:] if n > 0 and len(history_items) > n else list(history_items)
 
-    # Truncate user input field
-    user_input_trim = _trim_tokens(user_input, max_user_tokens)
+    # 3) Render single system message content
+    rendered_history = _render_history_lines(selected)
 
-    system_content = ""
-    if running_summary:
-        summary_trim = _trim_tokens(str(running_summary), max_summary_tokens)
-        system_content = f"Summary of prior conversation:\n{summary_trim}\n\nNew user input:\n{user_input_trim}"
-    else:
-        # Collect last up to 10 prior messages
-        prior_msgs = _collect_prior_messages_for_context(existing_messages, user_input_trim, limit=10)
-        # If still empty, attempt to use persisted REPL history logs as a fallback
-        if not prior_msgs:
-            # Try to derive a session key/id for filtering
-            sid = _get(req, "session_id") or _get(state, "session_id") or _get(req, "sessionId") or _get(state, "sessionId") or None
-            try:
-                # Prefer only input/output types
-                recs = get_recent_messages(n=10, session_id=sid, include_types={"input", "output"})
-                tmp_msgs: list[dict] = []
-                for r in recs:
-                    role = "user" if str(r.get("type")).lower() == "input" else "assistant"
-                    tmp_msgs.append({"role": role, "content": str(r.get("text") or "")})
-                # Exclude last if it's equivalent to current user input
-                if tmp_msgs:
-                    last = tmp_msgs[-1]
-                    if last.get("role") == "user" and (last.get("content") or "").strip() == user_input_trim.strip():
-                        tmp_msgs = tmp_msgs[:-1]
-                prior_msgs = tmp_msgs[-10:]
-            except Exception:
-                prior_msgs = []
+    # 4) Create final messages list
+    sys_msg = {"role": "system", "content": rendered_history, "name": "Conversation history"}
+    user_msg = {"role": "user", "content": ui}
+    messages = [sys_msg, user_msg]
 
-        # Build formatted lines
-        if prior_msgs:
-            formatted_lines: list[str] = []
-            for m in prior_msgs:
-                role = (m.get("role") or "user").strip().lower()
-                content = "" if m.get("content") is None else str(m.get("content"))
-                content = _trim_tokens(content, max_line_tokens)
-                formatted_lines.append(f"{role}: {content}")
-            formatted = "\n".join(formatted_lines).strip()
-            system_content = f"Recent conversation (last {len(prior_msgs)} messages):\n{formatted}\n\nNew user input:\n{user_input_trim}"
-        else:
-            # Fallback: no history at all
-            system_content = f"New user input:\n{user_input_trim}"
+    # 5) Persist only the user message
+    try:
+        add_turn(cid, role="user", content=ui)
+    except Exception as e:
+        _debug(f"[conversation_manager] add_turn failed in handle_repl_turn: {e}")
 
-    # Construct the messages array for GPT-5
-    sys_msg = {
-        "role": "system",
-        "name": "Conversation history",
-        "content": system_content,
-    }
-    user_msg = {
-        "role": "user",
-        "content": user_input_trim,
-    }
-    req["messages"] = [sys_msg, user_msg]
-    # Do not forward raw prior turns to GPT-5 (avoid duplication)
-    # Remove prompt if present to avoid conflicting inputs
-    if "prompt" in req:
-        try:
-            del req["prompt"]
-        except Exception:
-            pass
-    return req
+    # 6) Validation: ensure non-empty and each item has role+content
+    if not messages:
+        messages = [{"role": "user", "content": ui}]
+    normalized: list[dict] = []
+    for m in messages:
+        role = (m.get("role") or "user")
+        content = "" if m.get("content") is None else str(m.get("content"))
+        normalized.append({"role": role, "content": content, **({"name": m.get("name")} if m.get("name") else {})})
+    return normalized
 
 
 __all__ = [
@@ -2328,6 +2316,9 @@ __all__ = [
     "installWithAskExecutor",
     "wrapAsk",
     "resolveSessionKey",
+    # Convenience turn APIs
+    "add_turn",
+    "get_turns",
     # New API
     "handle_repl_turn",
 ]
