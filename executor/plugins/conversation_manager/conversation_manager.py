@@ -1,7 +1,3 @@
-# Plugin: conversation_manager
-# Purpose: Store REPL history in a local JSON file with append, list, and clear operations; configurable file path; safe concurrent access via file locks; atomic writes; rotation/retention to prevent unbounded growth.
-# Extended: SummarizeOnOverflow — auto-summarize conversation history once it exceeds a token budget and persist the summary.
-
 import os
 import sys
 import json
@@ -1304,7 +1300,7 @@ def get_summarization_stats() -> dict:
 
 
 # -------------------------
-# ask_executor Integration
+# ask_executor Integration (existing simple wrapper)
 # -------------------------
 
 _history_window_size_default = 10
@@ -1449,6 +1445,656 @@ def ask_executor(
 
 
 # -------------------------
+# Persistent Memory: Storage Adapters
+# -------------------------
+
+# Memory environment configuration
+CONV_MGR_MEMORY_PATH = os.environ.get("CONV_MGR_MEMORY_PATH", ".executor/memory")
+CONV_MGR_MAX_HISTORY_TOKENS = int(os.environ.get("CONV_MGR_MAX_HISTORY_TOKENS", "4096") or "4096")
+CONV_MGR_WINDOW_MESSAGES = int(os.environ.get("CONV_MGR_WINDOW_MESSAGES", "20") or "20")
+CONV_MGR_SUMMARY_TRIGGER_TOKENS = int(os.environ.get("CONV_MGR_SUMMARY_TRIGGER_TOKENS", "6000") or "6000")
+CONV_MGR_PRUNE = (os.environ.get("CONV_MGR_PRUNE", "none") or "none").strip().lower()
+
+def tokenEstimator(text: str) -> int:
+    """
+    Lightweight token count heuristic; can be swapped by users by setting tokenizer.
+    """
+    return _safe_count_tokens(text or "")
+
+def _sanitize_session_key(key: str) -> str:
+    # Produce a safe file name
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in (key or "default"))
+    if not safe:
+        safe = "default"
+    return safe
+
+def _new_message_id() -> str:
+    return f"{int(time.time()*1000)}-{os.getpid()}-{int.from_bytes(os.urandom(3),'big'):06d}"
+
+class StorageAdapter(_t.Protocol):
+    def append(self, session_key: str, message: dict) -> dict: ...
+    def read(self, session_key: str) -> _t.List[dict]: ...
+    def write_all(self, session_key: str, records: _t.List[dict]) -> None: ...
+    def clear(self, session_key: str) -> None: ...
+    def export(self, session_key: str) -> _t.List[dict]: ...
+    def import_messages(self, session_key: str, messages: _t.List[dict]) -> None: ...
+
+class MemoryStore:
+    """
+    In-memory storage adapter (for tests).
+    """
+    def __init__(self) -> None:
+        self._data: dict[str, list[dict]] = {}
+        self._meta: dict[str, dict] = {}
+
+    def append(self, session_key: str, message: dict) -> dict:
+        s = str(session_key or "default")
+        rec = dict(message)
+        rec.setdefault("id", _new_message_id())
+        rec.setdefault("created_at", _iso_utc_now())
+        self._data.setdefault(s, []).append(rec)
+        return rec
+
+    def read(self, session_key: str) -> _t.List[dict]:
+        return list(self._data.get(str(session_key or "default"), []))
+
+    def write_all(self, session_key: str, records: _t.List[dict]) -> None:
+        self._data[str(session_key or "default")] = list(records or [])
+
+    def clear(self, session_key: str) -> None:
+        self._data[str(session_key or "default")] = []
+
+    def export(self, session_key: str) -> _t.List[dict]:
+        return self.read(session_key)
+
+    def import_messages(self, session_key: str, messages: _t.List[dict]) -> None:
+        existing = self.read(session_key)
+        self.write_all(session_key, existing + list(messages or []))
+
+class FileStore:
+    """
+    File-based storage adapter. One JSONL file per session key.
+    Provides safe concurrent appends and atomic rewrites.
+    """
+    def __init__(self, base_path: _t.Optional[str] = None, compact_every: int = 250) -> None:
+        self.base_path = base_path or CONV_MGR_MEMORY_PATH
+        self.compact_every = max(1, int(compact_every))
+        self._append_counters: dict[str, int] = {}
+        try:
+            os.makedirs(self.base_path, exist_ok=True)
+        except Exception:
+            pass
+
+    def _path(self, session_key: str) -> str:
+        name = _sanitize_session_key(session_key)
+        return os.path.join(self.base_path, f"{name}.jsonl")
+
+    def append(self, session_key: str, message: dict) -> dict:
+        path = self._path(session_key)
+        _ensure_dir_exists(path)
+        rec = dict(message)
+        rec.setdefault("id", _new_message_id())
+        rec.setdefault("created_at", _iso_utc_now())
+        line = json.dumps(rec, ensure_ascii=False)
+        with _file_lock(path):
+            with open(path, "a", encoding="utf-8", newline="\n") as f:
+                f.write(line + "\n")
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            cnt = self._append_counters.get(path, 0) + 1
+            self._append_counters[path] = cnt
+            if cnt % self.compact_every == 0:
+                # Periodic compaction: rewrite a normalized file (no functional change)
+                self._compact_locked(path)
+        return rec
+
+    def _compact_locked(self, path: str) -> None:
+        try:
+            records = []
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            if isinstance(obj, dict):
+                                records.append(obj)
+                        except Exception:
+                            continue
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                for r in records:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, path)
+        except Exception as e:
+            _debug(f"[conversation_manager] FileStore compaction failed for {path}: {e}")
+
+    def read(self, session_key: str) -> _t.List[dict]:
+        path = self._path(session_key)
+        if not os.path.exists(path):
+            return []
+        out: list[dict] = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            out.append(obj)
+                    except Exception:
+                        continue
+        except Exception as e:
+            _debug(f"[conversation_manager] FileStore read error: {e}")
+        return out
+
+    def write_all(self, session_key: str, records: _t.List[dict]) -> None:
+        path = self._path(session_key)
+        _ensure_dir_exists(path)
+        tmp = path + ".tmp"
+        with _file_lock(path):
+            try:
+                with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                    for r in records or []:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    try:
+                        f.flush()
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                os.replace(tmp, path)
+            except Exception as e:
+                _debug(f"[conversation_manager] FileStore write_all failed: {e}")
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
+
+    def clear(self, session_key: str) -> None:
+        self.write_all(session_key, [])
+
+    def export(self, session_key: str) -> _t.List[dict]:
+        return self.read(session_key)
+
+    def import_messages(self, session_key: str, messages: _t.List[dict]) -> None:
+        existing = self.read(session_key)
+        self.write_all(session_key, existing + list(messages or []))
+
+
+# -------------------------
+# ConversationManager
+# -------------------------
+
+_Message = dict
+
+def _build_message(role: str, content: str, metadata: _t.Optional[dict] = None, **extra) -> dict:
+    msg: dict = {
+        "id": _new_message_id(),
+        "role": (role or "user"),
+        "content": "" if content is None else str(content),
+        "metadata": dict(metadata or {}),
+        "created_at": _iso_utc_now(),
+    }
+    # Optional extras
+    for k, v in extra.items():
+        if v is not None:
+            msg[k] = v
+    return msg
+
+def _trim_messages_fifo(messages: _t.List[dict], max_tokens: int) -> _t.List[dict]:
+    if max_tokens <= 0:
+        return []
+    total = 0
+    # Count from end (most recent) and keep while under budget, then reverse
+    kept: list[dict] = []
+    for m in reversed(messages):
+        t = tokenEstimator(m.get("content", "") or "")
+        if total + t <= max_tokens or not kept:
+            kept.append(m)
+            total += t
+        else:
+            break
+    kept.reverse()
+    return kept
+
+def _naive_summary_of(messages: _t.List[dict], max_tokens: int, window_messages: int) -> str:
+    # Create a naive "compressed" summary of older turns by concatenating trimmed lines.
+    lines: list[str] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        # Keep a short prefix per message
+        # Aim small: ~ max_tokens // 8 messages lines
+        snippet = content[:200]
+        lines.append(f"{role}: {snippet}")
+    text = " | ".join(lines)
+    # Trim to budget
+    return _trim_to_token_budget(text, max_tokens)
+
+class ConversationManager:
+    """
+    Persistent conversation memory manager with pluggable storage and context strategies.
+    """
+
+    def __init__(self, opts: _t.Optional[dict] = None):
+        opts = dict(opts or {})
+        store_opt = opts.get("store")
+        if isinstance(store_opt, StorageAdapter.__constraints__ if hasattr(StorageAdapter, "__constraints__") else ()):
+            self.store: StorageAdapter = store_opt  # type: ignore
+        elif isinstance(store_opt, (FileStore, MemoryStore)):
+            self.store = store_opt
+        elif str(store_opt or "").lower() == "memory":
+            self.store = MemoryStore()
+        else:
+            base = opts.get("path") or CONV_MGR_MEMORY_PATH
+            self.store = FileStore(base_path=base)
+
+        self.max_history_tokens = int(opts.get("max_history_tokens") or CONV_MGR_MAX_HISTORY_TOKENS)
+        self.window_messages = int(opts.get("window_messages") or CONV_MGR_WINDOW_MESSAGES)
+        self.summary_trigger_tokens = int(opts.get("summary_trigger_tokens") or CONV_MGR_SUMMARY_TRIGGER_TOKENS)
+        self.prune_strategy = str(opts.get("prune") or CONV_MGR_PRUNE or "none").strip().lower()
+        self.summarizer: _t.Optional[_t.Callable[[list[str]], _t.Union[str, dict]]] = opts.get("summarizer")
+        # Session -> current thread id mapping (in-memory)
+        self._threads: dict[str, str] = {}
+        self._session_meta: dict[str, dict] = {}
+
+    def getOrCreateSession(self, sessionKey: str, metadata: _t.Optional[dict] = None) -> str:
+        sk = str(sessionKey or "default")
+        if sk not in self._threads:
+            # New default thread id
+            tid = f"thread-{int(time.time()*1000)}"
+            self._threads[sk] = tid
+            self._session_meta[sk] = {
+                "id": tid,
+                "created_at": _iso_utc_now(),
+                "session_key": sk,
+                "metadata": dict(metadata or {}),
+            }
+        else:
+            if metadata:
+                self._session_meta[sk]["metadata"] = {**self._session_meta[sk].get("metadata", {}), **metadata}
+        return self._threads[sk]
+
+    def _current_thread(self, sessionKey: str) -> str:
+        return self.getOrCreateSession(sessionKey)
+
+    def recordUser(self, sessionKey: str, content: _t.Any, metadata: _t.Optional[dict] = None) -> dict:
+        msg = _build_message("user", "" if content is None else str(content), metadata or {}, thread_id=self._current_thread(sessionKey))
+        return self.store.append(sessionKey, msg)
+
+    def recordAssistant(
+        self,
+        sessionKey: str,
+        content: _t.Any,
+        extra: _t.Optional[dict] = None
+    ) -> dict:
+        extra = dict(extra or {})
+        tool_calls = extra.get("tool_calls")
+        tool_results = extra.get("tool_results")
+        usage = extra.get("usage")
+        metadata = extra.get("metadata") or {}
+        msg = _build_message("assistant", "" if content is None else str(content), metadata, thread_id=self._current_thread(sessionKey))
+        if tool_calls is not None:
+            msg["tool_calls"] = tool_calls
+        if tool_results is not None:
+            msg["tool_results"] = tool_results
+        if usage is not None:
+            msg["usage"] = usage
+        rec = self.store.append(sessionKey, msg)
+        # Post-append pruning if configured
+        try:
+            if self.prune_strategy in ("fifo", "summarize"):
+                self._prune_if_needed(sessionKey)
+        except Exception as e:
+            _debug(f"[conversation_manager] prune failed: {e}")
+        return rec
+
+    def _messages_for_thread(self, sessionKey: str, thread_id: _t.Optional[str] = None) -> list[dict]:
+        thread_id = thread_id or self._current_thread(sessionKey)
+        records = self.store.read(sessionKey)
+        return [r for r in records if r.get("thread_id") == thread_id]
+
+    def getContext(self, sessionKey: str, options: _t.Optional[dict] = None) -> _t.List[dict]:
+        """
+        Return a list of {role, content} messages based on strategy:
+        - 'full': all thread messages (subject to max_tokens if provided)
+        - 'windowed': last window_messages
+        - 'summary': if tokens exceed trigger, include a system summary of older turns + recent turns
+        """
+        opts = dict(options or {})
+        strategy = str(opts.get("strategy") or "summary").strip().lower()
+        max_tokens = int(opts.get("max_tokens") or self.max_history_tokens)
+        messages = self._messages_for_thread(sessionKey)
+        # Consider only role and content in output
+        def as_msg(r: dict) -> dict:
+            return {"role": r.get("role") or "user", "content": r.get("content") or ""}
+        if strategy == "windowed":
+            window = max(0, int(self.window_messages))
+            return [as_msg(m) for m in messages[-window:]]
+        if strategy == "full":
+            # Optionally trim by tokens if provided
+            if max_tokens and max_tokens > 0:
+                trimmed = _trim_messages_fifo(messages, max_tokens)
+                return [as_msg(m) for m in trimmed]
+            return [as_msg(m) for m in messages]
+        # summary strategy
+        total_tokens = sum(tokenEstimator(m.get("content", "") or "") for m in messages)
+        if total_tokens <= self.summary_trigger_tokens:
+            # If within trigger, optionally still cap to max_tokens
+            if max_tokens and max_tokens > 0 and total_tokens > max_tokens:
+                trimmed = _trim_messages_fifo(messages, max_tokens)
+                return [as_msg(m) for m in trimmed]
+            return [as_msg(m) for m in messages[-max(0, self.window_messages):]]
+        # Build a summary for older part and keep last window_messages
+        window = max(0, int(self.window_messages))
+        recent = messages[-window:]
+        older = messages[:-window]
+        older_texts = [f"{m.get('role')}: {m.get('content')}" for m in older]
+        if self.summarizer:
+            try:
+                summary = self.summarizer(older_texts)
+                if isinstance(summary, dict):
+                    summary_text = summary.get("summary") or json.dumps(summary, ensure_ascii=False)
+                else:
+                    summary_text = str(summary)
+            except Exception as e:
+                _debug(f"[conversation_manager] summarizer failed, using naive: {e}")
+                summary_text = _naive_summary_of(older, max_tokens=max(128, max_tokens // 4), window_messages=window)
+        else:
+            summary_text = _naive_summary_of(older, max_tokens=max(128, max_tokens // 4), window_messages=window)
+        system_summary = {"role": "system", "content": f"Conversation summary of earlier turns: {summary_text}"}
+        out = [system_summary] + [as_msg(m) for m in recent]
+        # Ensure within max_tokens if set
+        if max_tokens and max_tokens > 0:
+            # Trim older from the front but keep system summary
+            total = sum(tokenEstimator(m["content"]) for m in out)
+            if total > max_tokens:
+                # remove from recent start
+                kept = [out[0]]  # system summary
+                total = tokenEstimator(out[0]["content"])
+                for m in out[1:][::-1]:
+                    t = tokenEstimator(m["content"])
+                    if total + t <= max_tokens or len(kept) == 1:
+                        kept.append(m)
+                        total += t
+                kept = [kept[0]] + list(reversed(kept[1:]))
+                out = kept
+        return out
+
+    def switchThread(self, sessionKey: str, newThreadId: _t.Optional[str] = None) -> dict:
+        sk = str(sessionKey or "default")
+        new_id = newThreadId or f"thread-{int(time.time()*1000)}"
+        self._threads[sk] = new_id
+        # Update session meta
+        self._session_meta[sk] = {
+            "id": new_id,
+            "created_at": self._session_meta.get(sk, {}).get("created_at", _iso_utc_now()),
+            "session_key": sk,
+            "metadata": self._session_meta.get(sk, {}).get("metadata", {}),
+        }
+        return {"threadId": new_id}
+
+    def clear(self, sessionKey: str) -> None:
+        self.store.clear(sessionKey)
+
+    def export(self, sessionKey: str) -> _t.List[dict]:
+        return self.store.export(sessionKey)
+
+    def import_(self, sessionKey: str, messages: _t.List[dict]) -> None:
+        self.store.import_messages(sessionKey, messages)
+
+    # Back-compat name requested in spec
+    def importMessages(self, sessionKey: str, messages: _t.List[dict]) -> None:
+        self.import_(sessionKey, messages)
+
+    def _prune_if_needed(self, sessionKey: str) -> None:
+        messages = self._messages_for_thread(sessionKey)
+        total_tokens = sum(tokenEstimator(m.get("content", "") or "") for m in messages)
+        if total_tokens <= self.max_history_tokens:
+            return
+        if self.prune_strategy == "fifo":
+            trimmed = _trim_messages_fifo(messages, self.max_history_tokens)
+            # Rewrite only this thread's messages, preserving others
+            all_msgs = self.store.read(sessionKey)
+            tid = self._current_thread(sessionKey)
+            kept_other = [m for m in all_msgs if m.get("thread_id") != tid]
+            self.store.write_all(sessionKey, kept_other + trimmed)
+        elif self.prune_strategy == "summarize":
+            window = max(0, int(self.window_messages))
+            recent = messages[-window:]
+            older = messages[:-window]
+            older_texts = [f"{m.get('role')}: {m.get('content')}" for m in older]
+            if self.summarizer:
+                try:
+                    summary = self.summarizer(older_texts)
+                    if isinstance(summary, dict):
+                        summary_text = summary.get("summary") or json.dumps(summary, ensure_ascii=False)
+                    else:
+                        summary_text = str(summary)
+                except Exception as e:
+                    _debug(f"[conversation_manager] summarizer failed during prune; using naive: {e}")
+                    summary_text = _naive_summary_of(older, max_tokens=max(128, self.max_history_tokens // 4), window_messages=window)
+            else:
+                summary_text = _naive_summary_of(older, max_tokens=max(128, self.max_history_tokens // 4), window_messages=window)
+            summary_msg = _build_message("system", f"Conversation summary of earlier turns (pruned): {summary_text}", {"type": "summary"}, thread_id=self._current_thread(sessionKey))
+            pruned = [summary_msg] + recent
+            all_msgs = self.store.read(sessionKey)
+            tid = self._current_thread(sessionKey)
+            kept_other = [m for m in all_msgs if m.get("thread_id") != tid]
+            self.store.write_all(sessionKey, kept_other + pruned)
+
+
+# -------------------------
+# ask_executor Integration: Middleware and Wrapper
+# -------------------------
+
+def resolveSessionKey(ctx: _t.Any) -> str:
+    """
+    Derives a stable key from any of:
+    ctx.session_id || ctx.repl_id || ctx.thread_id || ctx.user_id || ctx.workspace_id || process.cwd()
+    plus model id if present (ctx.model or ctx.model_id).
+    """
+    parts: list[str] = []
+    def pick(*names: str) -> _t.Optional[str]:
+        for n in names:
+            v = getattr(ctx, n, None) if not isinstance(ctx, dict) else ctx.get(n)
+            if v:
+                return str(v)
+        return None
+
+    sid = pick("session_id", "sessionId") or pick("repl_id") or pick("thread_id", "threadId") or pick("user_id", "userId") or pick("workspace_id", "workspaceId")
+    if not sid:
+        try:
+            sid = os.getcwd()
+        except Exception:
+            sid = "default"
+    model = pick("model", "model_id", "modelId") or ""
+    key = f"{sid}::{model}".strip(":")
+    return key
+
+def installWithAskExecutor(executor: _t.Any, options: _t.Optional[dict] = None) -> ConversationManager:
+    """
+    Hook-based installer that binds to ask_executor lifecycle to auto-load and persist conversation memory.
+    """
+    opts = dict(options or {})
+    cm = ConversationManager(opts.get("memory") or {})
+    # Detect and bind to common hook names
+    before = getattr(getattr(executor, "hooks", None), "beforeRun", None) or getattr(getattr(executor, "hooks", None), "beforeAsk", None) or getattr(getattr(executor, "events", None), "beforeTurn", None)
+    after = getattr(getattr(executor, "hooks", None), "afterRun", None) or getattr(getattr(executor, "hooks", None), "afterAsk", None) or getattr(getattr(executor, "events", None), "afterTurn", None)
+    if not before or not after:
+        raise RuntimeError("ask_executor hooks not found")
+
+    def _tap(hook: _t.Any, name: str, fn: _t.Callable[[dict], _t.Any]) -> None:
+        try:
+            if hasattr(hook, "tap") and callable(getattr(hook, "tap")):
+                hook.tap(name, fn)  # type: ignore
+            elif hasattr(hook, "add") and callable(getattr(hook, "add")):
+                hook.add(fn)  # type: ignore
+            elif hasattr(hook, "connect") and callable(getattr(hook, "connect")):
+                hook.connect(fn)  # type: ignore
+            elif isinstance(hook, list):
+                hook.append(fn)
+            else:
+                # Fallback: try setting attribute
+                setattr(hook, name, fn)
+        except Exception:
+            # As a last resort, callables may be used directly
+            pass
+
+    def _before(ctx: _t.Any) -> None:
+        sessionKey = resolveSessionKey(ctx)
+        if isinstance(ctx, dict):
+            ctx.setdefault("memory", {})
+        else:
+            if not hasattr(ctx, "memory") or ctx.memory is None:
+                try:
+                    setattr(ctx, "memory", {})
+                except Exception:
+                    pass
+        # Thread info
+        thread_id = cm.getOrCreateSession(sessionKey)
+        try:
+            if isinstance(ctx, dict):
+                ctx["memory"]["threadId"] = thread_id
+            else:
+                ctx.memory["threadId"] = thread_id
+        except Exception:
+            pass
+        strategy = opts.get("strategy") or "summary"
+        maxTokens = int(opts.get("max_history_tokens") or CONV_MGR_MAX_HISTORY_TOKENS)
+        messages = cm.getContext(sessionKey, {"strategy": strategy, "max_tokens": maxTokens})
+        try:
+            if isinstance(ctx, dict):
+                ctx["messages"] = messages
+            else:
+                setattr(ctx, "messages", messages)
+        except Exception:
+            pass
+
+    def _after(ctx: _t.Any) -> None:
+        sessionKey = resolveSessionKey(ctx)
+        # Persist turn
+        try:
+            user_input = ctx.get("user_input") if isinstance(ctx, dict) else getattr(ctx, "user_input", None)
+            user_meta = ctx.get("user_meta") if isinstance(ctx, dict) else getattr(ctx, "user_meta", None)
+            if user_input is not None:
+                cm.recordUser(sessionKey, user_input, user_meta)
+        except Exception:
+            pass
+        try:
+            output = ctx.get("output") if isinstance(ctx, dict) else getattr(ctx, "output", None)
+            tool_calls = ctx.get("tool_calls") if isinstance(ctx, dict) else getattr(ctx, "tool_calls", None)
+            tool_results = ctx.get("tool_results") if isinstance(ctx, dict) else getattr(ctx, "tool_results", None)
+            usage = ctx.get("usage") if isinstance(ctx, dict) else getattr(ctx, "usage", None)
+            assistant_meta = ctx.get("assistant_meta") if isinstance(ctx, dict) else getattr(ctx, "assistant_meta", None)
+            cm.recordAssistant(sessionKey, output, {"tool_calls": tool_calls, "tool_results": tool_results, "usage": usage, "metadata": assistant_meta})
+        except Exception:
+            pass
+
+    _tap(before, "conversation_manager", _before)
+    _tap(after, "conversation_manager", _after)
+    return cm
+
+def wrapAsk(ask: _t.Callable[..., _t.Any], options: _t.Optional[dict] = None) -> _t.Callable[..., _t.Any]:
+    """
+    Function wrapper that enriches context with memory and persists after the call.
+    """
+    opts = dict(options or {})
+    cm = ConversationManager(opts.get("memory") or {})
+
+    async def _maybe_await(x):
+        if hasattr(x, "__await__"):
+            return await x  # type: ignore
+        return x
+
+    def _sync_or_async_result(result):
+        return result
+
+    def _wrapped_sync(input: _t.Any, ctx: _t.Optional[dict] = None):
+        _ctx = dict(ctx or {})
+        sessionKey = resolveSessionKey(_ctx) or _ctx.get("session_id") or _ctx.get("thread_id") or "default"
+        strategy = opts.get("strategy") or "summary"
+        maxTokens = int(opts.get("max_history_tokens") or CONV_MGR_MAX_HISTORY_TOKENS)
+        history = cm.getContext(sessionKey, {"strategy": strategy, "max_tokens": maxTokens})
+        enhancedCtx = {**_ctx, "messages": history}
+        result = ask(input, enhancedCtx)
+        # Try to persist using result forms
+        try:
+            cm.recordUser(sessionKey, input, _ctx.get("user_meta"))
+        except Exception:
+            pass
+        try:
+            output = getattr(result, "output", None)
+            if output is None:
+                output = getattr(result, "text", None)
+            if output is None and not isinstance(result, (dict, list)):
+                output = result
+            tool_calls = getattr(result, "tool_calls", None)
+            tool_results = getattr(result, "tool_results", None)
+            usage = getattr(result, "usage", None)
+            assistant_meta = getattr(result, "assistant_meta", None)
+            if isinstance(result, dict):
+                output = result.get("output") or result.get("text") or output
+                tool_calls = result.get("tool_calls", tool_calls)
+                tool_results = result.get("tool_results", tool_results)
+                usage = result.get("usage", usage)
+                assistant_meta = result.get("assistant_meta", assistant_meta)
+            cm.recordAssistant(sessionKey, output, {"tool_calls": tool_calls, "tool_results": tool_results, "usage": usage, "metadata": assistant_meta})
+        except Exception:
+            pass
+        return result
+
+    return _wrapped_sync
+
+
+# -------------------------
+# Utilities
+# -------------------------
+
+def migrate(legacy_histories: dict) -> int:
+    """
+    Simple importer for legacy in-memory histories.
+    Accepts a mapping of { sessionKey: [ {role, content}|str ] } and writes to default store.
+    Returns number of sessions imported.
+    """
+    if not isinstance(legacy_histories, dict):
+        return 0
+    cm = ConversationManager({})
+    imported = 0
+    for sk, msgs in legacy_histories.items():
+        try:
+            cm.getOrCreateSession(sk)
+            converted: list[dict] = []
+            for m in msgs or []:
+                if isinstance(m, dict):
+                    role = m.get("role") or "user"
+                    content = m.get("content") or m.get("text") or ""
+                else:
+                    role, content = "user", str(m)
+                converted.append(_build_message(role, content, {}, thread_id=cm._current_thread(sk)))
+            cm.import_(sk, converted)
+            imported += 1
+        except Exception as e:
+            _debug(f"[conversation_manager] migrate failed for {sk}: {e}")
+    return imported
+
+
+# -------------------------
 # Backward-compatible run()
 # -------------------------
 
@@ -1486,9 +2132,19 @@ __all__ = [
     "getLatestSummary",
     "loadWithSummary",
     "get_summarization_stats",
-    # ask_executor integration
+    # ask_executor integration (existing)
     "ask_executor",
     "set_ask_executor_backend",
     "set_history_window_size",
     "get_history_window_size",
+    # Persistent memory exports
+    "StorageAdapter",
+    "MemoryStore",
+    "FileStore",
+    "ConversationManager",
+    "tokenEstimator",
+    "migrate",
+    "installWithAskExecutor",
+    "wrapAsk",
+    "resolveSessionKey",
 ]
