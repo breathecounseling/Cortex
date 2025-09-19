@@ -15,11 +15,12 @@ def run_pytest(test_file: str):
     """Run pytest on a single file, return (passed, output)."""
     try:
         result = subprocess.run(
-            ["pytest", "-q", test_file],
+            ["python", "-m", "pytest", "-q", test_file],
             capture_output=True,
             text=True,
             check=True
         )
+
         return True, result.stdout
     except subprocess.CalledProcessError as e:
         return False, e.stdout + "\n" + e.stderr
