@@ -1,6 +1,6 @@
 """
 OpenAI Responses API connector for Executor.
-Provides ask_executor() for freeform prompts and tool calls.
+Registers Builder and Extender as tools and provides ask_executor().
 """
 
 import os
@@ -17,8 +17,10 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Import Builder and Extender
 from executor.plugins.builder import builder, extend_plugin
 
+# Tool registry
 TOOLS = [
     {
         "type": "function",
@@ -49,36 +51,49 @@ TOOLS = [
 ]
 
 SYSTEM_INSTRUCTIONS = (
-    "You are Cortex Executor, an AI system that writes and edits Python plugins. "
+    "You are Cortex Executor, an AI system that writes and edits plugins. "
     "If the user request is vague, ask clarifying questions. "
-    "If code is provided with an error log, fix only the broken parts while preserving working code. "
+    "When calling tools, provide the correct parameters. "
+    "When fixing code, preserve all working functions and only fix broken ones. "
     "When outputting code, return ONLY the complete corrected file."
 )
 
-def ask_executor(prompt: str, tools: list = None, thread_id: str = "default"):
+def ask_executor(prompt: str, thread_id: str = "default"):
     """
     High-level interface to the OpenAI Responses API.
-    Returns a dict with either response_text or function_call.
+    Routes natural language input to freeform responses or tool calls.
     """
     response = client.responses.create(
         model="gpt-5",
         instructions=SYSTEM_INSTRUCTIONS,
         input=prompt,
-        tools=tools or [],
+        tools=TOOLS,
         store=False
     )
 
-    # If plain text output
+    # Default result
     out_text = getattr(response, "output_text", None) or ""
     result = {"status": "ok", "response_text": out_text, "raw": response}
 
-    # Inspect function calls if present
+    # Inspect function calls
     for item in response.output:
         if item.type == "function_call":
             try:
                 args = json.loads(item.arguments)
             except Exception:
                 args = {}
+
+            if item.name == "build_plugin":
+                return builder.build_plugin(
+                    plugin_name=args.get("plugin_name", ""),
+                    purpose=args.get("purpose", "")
+                )
+            elif item.name == "extend_plugin":
+                return extend_plugin.extend_plugin(
+                    plugin_name=args.get("plugin_name", ""),
+                    new_feature=args.get("new_feature", "")
+                )
+
             result = {
                 "status": "function_call",
                 "name": item.name,
@@ -89,6 +104,12 @@ def ask_executor(prompt: str, tools: list = None, thread_id: str = "default"):
 
     return result
 
+
 if __name__ == "__main__":
-    # Quick test
-    print(ask_executor("Write a hello world Python function"))
+    print("Cortex Executor REPL (type 'quit' to exit)")
+    while True:
+        user_input = input("You: ").strip()
+        if user_input.lower() in ["quit", "exit"]:
+            break
+        output = ask_executor(user_input)
+        print("Executor:", output)
