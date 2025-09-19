@@ -2258,6 +2258,50 @@ def _format_history_for_system_message(history: _t.List[dict], limit: int = 10) 
         lines.append(f"{role_label}: { _ensure_plain_string(m.get('content')) }")
     return "Conversation history:\n" + "\n".join(lines)
 
+def _format_completed_turns_system_message(history: _t.Any, limit: int = 10) -> str:
+    """
+    Build system message content for completed user->assistant turns only.
+
+    Header must be exactly:
+    'Conversation history (facts to remember):'
+    followed by newline if any bullets; otherwise just the header line.
+
+    - Use up to the most recent 'limit' completed turns (user immediately followed by assistant),
+      ignoring system/tool/other roles.
+    - Order: oldest to newest among the selected turns.
+    - For each turn, output exactly:
+        - "- User: {user_content}"
+        - "- Assistant: {assistant_content}"
+    """
+    msgs = _normalize_history_entries(history)
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    n = len(msgs)
+    while i + 1 < n:
+        a = msgs[i]
+        b = msgs[i + 1]
+        if (a.get("role") == "user") and (b.get("role") == "assistant"):
+            user_content = "" if a.get("content") is None else str(a.get("content"))
+            asst_content = "" if b.get("content") is None else str(b.get("content"))
+            pairs.append((user_content, asst_content))
+            i += 2  # consume the pair
+        else:
+            i += 1  # move forward to seek a valid immediate pair
+
+    # Keep only the most recent 'limit' pairs, then output oldest->newest among those
+    if limit > 0 and len(pairs) > limit:
+        pairs = pairs[-limit:]
+
+    header = "Conversation history (facts to remember):"
+    if not pairs:
+        return header
+
+    lines: list[str] = []
+    for u, a in pairs:
+        lines.append(f"- User: {u}")
+        lines.append(f"- Assistant: {a}")
+    return header + "\n" + "\n".join(lines)
+
 # -------------------------
 # Updated handle_repl_turn (dual-signature for compatibility)
 # -------------------------
@@ -2271,7 +2315,9 @@ def handle_repl_turn(currentUserInput: _t.Any, history: _t.Any = None, max_turns
       -> { messages: [{role, content}], updatedHistory: [{role, content}] }
 
     - Builds a single system message summarizing the most recent 10 user/assistant turns,
-      oldest-to-newest, with lines 'User: ...' or 'Assistant: ...'.
+      oldest-to-newest, with bullet lines for each completed turn:
+        - User: ...
+        - Assistant: ...
     - Returns messages = [system, currentUser], and updatedHistory with the current user turn appended.
     - Never saves/persists the system message.
 
@@ -2294,7 +2340,7 @@ def handle_repl_turn(currentUserInput: _t.Any, history: _t.Any = None, max_turns
         # New GPT-5-compliant behavior
         current_user_text = _ensure_plain_string(currentUserInput)
         prior = _normalize_history_entries(history)
-        system_content = _format_history_for_system_message(prior, limit=10)
+        system_content = _format_completed_turns_system_message(prior, limit=10)
         messages = [
             {"role": "system", "content": system_content},
             {"role": "user", "content": current_user_text},
@@ -2337,10 +2383,10 @@ def handle_repl_turn(currentUserInput: _t.Any, history: _t.Any = None, max_turns
         except Exception:
             history_items = []
 
-    # Filter only user/assistant for the system message and select last n (<=10 by default)
+    # Filter only user/assistant for the system message
     filtered = [m for m in history_items if str(m.get("role") or "").lower() in ("user", "assistant")]
-    selected = filtered[-min(n, 10):] if filtered else []
-    system_content = _format_history_for_system_message(selected, limit=min(n, 10))
+    # Build system message content using completed turns logic (limit to at most 10 turns or n, whichever is smaller)
+    system_content = _format_completed_turns_system_message(filtered, limit=min(n, 10))
 
     # Build messages (preserve legacy 'name' field for system)
     sys_msg = {"role": "system", "content": system_content, "name": "Conversation history"}
