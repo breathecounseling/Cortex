@@ -70,7 +70,7 @@ Return ONLY the full corrected plugin code.
         safe_name,
         main_file,
         test_file,
-        openai_client.ask_executor,   # ✅ inject ask_executor here
+        openai_client.ask_executor,   # ✅ inject ask_executor
         max_retries=max_retries
     )
 
