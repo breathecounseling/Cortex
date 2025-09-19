@@ -67,8 +67,6 @@ def test_run():
         max_retries=max_retries
     )
 
-    )
-
     # --- Commit ---
     if passed:
         success = git_commit_push(safe_name, branch="dev")
