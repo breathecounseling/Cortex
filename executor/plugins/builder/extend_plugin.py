@@ -39,7 +39,12 @@ def git_commit_push(plugin_name: str, branch: str = "dev"):
 def request_patch(plugin_name: str, code: str, test_code: str, error_log: str):
     """Ask GPT-5 to patch code based on failing tests."""
     prompt = f"""
-A plugin named {plugin_name} was extended but failed its tests.
+You are an AI code patcher. A plugin named {plugin_name} was extended but failed its tests.
+
+Important: Plugins live in executor/plugins/<plugin_name>/ 
+and tests must import them using:
+from executor.plugins.<plugin_name> import <plugin_name>
+
 Here is the full plugin code:
 {code}
 
@@ -85,6 +90,10 @@ Here is the current plugin code:
 
 If tests are provided, ensure the code satisfies them:
 {test_code}
+
+Important: Plugins live in executor/plugins/<plugin_name>/ 
+and tests must import them using:
+from executor.plugins.<plugin_name> import <plugin_name>
 
 Return ONLY the full corrected plugin code.
 Do not remove existing working functions unless necessary.
