@@ -17,6 +17,37 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+from executor.plugins.builder import builder, extend_plugin
+
+TOOLS = [
+    {
+        "type": "function",
+        "name": "build_plugin",
+        "description": "Create a new Executor plugin.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plugin_name": {"type": "string"},
+                "purpose": {"type": "string"}
+            },
+            "required": ["plugin_name", "purpose"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "extend_plugin",
+        "description": "Extend an existing Executor plugin with a new feature.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plugin_name": {"type": "string"},
+                "new_feature": {"type": "string"}
+            },
+            "required": ["plugin_name", "new_feature"]
+        }
+    }
+]
+
 SYSTEM_INSTRUCTIONS = (
     "You are Cortex Executor, an AI system that writes and edits Python plugins. "
     "If the user request is vague, ask clarifying questions. "
