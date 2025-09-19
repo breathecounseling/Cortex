@@ -6,6 +6,7 @@ import os
 import subprocess
 import shutil
 from executor.utils.patcher_utils import iterative_patch
+from executor.connectors import openai_client  # ✅ imported only here
 
 PLUGIN_BASE = os.path.join(os.path.dirname(__file__), "..")
 
@@ -40,7 +41,6 @@ def extend_plugin(plugin_name: str, new_feature: str, test_code: str = "", max_r
         old_code = f.read()
 
     # Ask GPT-5 to extend
-    from executor.connectors import openai_client
     prompt = f"""
 Extend the plugin named {safe_name} with this feature:
 {new_feature}
@@ -52,8 +52,7 @@ If tests are provided, ensure the code satisfies them:
 {test_code}
 
 Important: Plugins live in executor/plugins/<plugin_name>/ 
-and tests must import them using:
-from executor.plugins.<plugin_name> import <plugin_name>
+and tests must import them using: from executor.plugins.<plugin_name> import <plugin_name>
 
 Return ONLY the full corrected plugin code.
     """
@@ -67,7 +66,13 @@ Return ONLY the full corrected plugin code.
         f.write(new_code)
 
     # --- Test + Patch Loop ---
-    passed, output = iterative_patch(safe_name, main_file, test_file, max_retries=max_retries)
+    passed, output = iterative_patch(
+        safe_name,
+        main_file,
+        test_file,
+        openai_client.ask_executor,   # ✅ inject ask_executor here
+        max_retries=max_retries
+    )
 
     if passed:
         success = git_commit_push(safe_name, branch="dev")
