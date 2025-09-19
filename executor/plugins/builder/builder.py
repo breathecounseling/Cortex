@@ -1,60 +1,12 @@
 """
-Builder Plugin with Autotester + Patcher + Git Integration + Correct Imports
+Builder Plugin with Autotester + Iterative Patcher + Git Integration + Heartbeats
 """
 
 import os
 import subprocess
-import json
-import shutil
-from executor.connectors import openai_client  # to call GPT-5 for patching
+from executor.utils.patcher_utils import iterative_patch
 
 PLUGIN_BASE = os.path.join(os.path.dirname(__file__), "..")
-
-def run_pytest(test_file: str):
-    """Run pytest on a single file, return (passed, output)."""
-    try:
-        result = subprocess.run(
-            ["python", "-m", "pytest", "-q", test_file],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return True, result.stdout
-    except subprocess.CalledProcessError as e:
-        return False, e.stdout + "\n" + e.stderr
-
-def request_patch(plugin_name: str, code: str, test_code: str, error_log: str):
-    """Ask GPT-5 (Responses API) to patch code based on failing tests."""
-    prompt = f"""
-You are an AI code patcher. A plugin named {plugin_name} failed its tests.
-
-Important: Plugins live in executor/plugins/<plugin_name>/ 
-and tests must import them using:
-from executor.plugins.<plugin_name> import <plugin_name>
-
-Here is the full plugin code:
-{code}
-
-Here is the test code:
-{test_code}
-
-Here is the pytest error log:
-{error_log}
-
-Fix ONLY what is necessary to make the tests pass.
-Do not remove working functions or unrelated logic.
-Return the FULL corrected plugin code.
-    """
-    response = openai_client.ask_executor(prompt)
-    return response.get("response_text", "")
-
-def apply_patch(file_path: str, new_code: str):
-    """Backup old file and write new code safely."""
-    backup_path = file_path + ".bak"
-    shutil.copy(file_path, backup_path)
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(new_code)
-    return backup_path
 
 def git_commit_push(plugin_name: str, branch: str = "dev"):
     """Commit and push changes to a safe branch."""
@@ -74,7 +26,7 @@ def build_plugin(plugin_name: str, purpose: str, max_retries: int = 3):
     if os.path.exists(plugin_dir):
         return {"status": "error", "message": f"Plugin '{safe_name}' already exists."}
 
-    # --- Step 1: Scaffold ---
+    # --- Scaffold ---
     os.makedirs(plugin_dir, exist_ok=True)
     with open(os.path.join(plugin_dir, "__init__.py"), "w") as f:
         f.write(f'""" {safe_name} plugin """\n')
@@ -93,7 +45,6 @@ def run():
     return {{"status": "ok", "plugin": "{safe_name}", "purpose": "{purpose}"}}
 ''')
 
-    # ✅ Scaffold tests with correct import style
     with open(test_file, "w") as f:
         f.write(f'''from executor.plugins.{safe_name} import {safe_name}
 
@@ -102,35 +53,12 @@ def test_run():
     assert result["status"] == "ok"
 ''')
 
-    # --- Step 2: Test ---
-    passed, output = run_pytest(test_file)
-    retries = 0
+    # --- Test + Patch Loop ---
+    passed, output = iterative_patch(safe_name, main_file, test_file, max_retries=max_retries)
 
-    while not passed and retries < max_retries:
-        retries += 1
-        print(f"[Heartbeat] Retry {retries}/{max_retries} for plugin '{safe_name}'... still running.")
-
-        with open(main_file, "r", encoding="utf-8") as f:
-            code = f.read()
-        with open(test_file, "r", encoding="utf-8") as f:
-            test_code = f.read()
-
-        patched_code = request_patch(safe_name, code, test_code, output)
-
-        if patched_code.strip():
-            backup = apply_patch(main_file, patched_code)
-            passed, output = run_pytest(test_file)
-            if not passed:
-                print(f"[Heartbeat] Patch attempt {retries} failed — rolling back and retrying.")
-                shutil.move(backup, main_file)
-        else:
-            print(f"[Heartbeat] GPT-5 returned no patch on attempt {retries}. Stopping.")
-            break
-
-    # --- Step 3: Git Commit ---
+    # --- Commit ---
     if passed:
         success = git_commit_push(safe_name, branch="dev")
-        print(f"[Heartbeat] Plugin '{safe_name}' built successfully and pushed to dev.")
         return {
             "status": "ok",
             "message": f"Plugin '{safe_name}' created and passed tests.",
@@ -138,7 +66,6 @@ def test_run():
             "git_pushed": success
         }
     else:
-        print(f"[Heartbeat] Plugin '{safe_name}' failed after {max_retries} retries. Rolled back.")
         return {
             "status": "error",
             "message": f"Plugin '{safe_name}' failed after {max_retries} retries.",
