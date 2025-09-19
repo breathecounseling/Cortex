@@ -1,5 +1,5 @@
 """
-Builder Plugin with Autotester + Patcher + Git Integration
+Builder Plugin with Autotester + Patcher + Git Integration + Correct Imports
 """
 
 import os
@@ -14,7 +14,7 @@ def run_pytest(test_file: str):
     """Run pytest on a single file, return (passed, output)."""
     try:
         result = subprocess.run(
-            ["pytest", "-q", test_file],
+            ["python", "-m", "pytest", "-q", test_file],
             capture_output=True,
             text=True,
             check=True
@@ -27,6 +27,11 @@ def request_patch(plugin_name: str, code: str, test_code: str, error_log: str):
     """Ask GPT-5 (Responses API) to patch code based on failing tests."""
     prompt = f"""
 You are an AI code patcher. A plugin named {plugin_name} failed its tests.
+
+Important: Plugins live in executor/plugins/<plugin_name>/ 
+and tests must import them using:
+from executor.plugins.<plugin_name> import <plugin_name>
+
 Here is the full plugin code:
 {code}
 
@@ -36,8 +41,9 @@ Here is the test code:
 Here is the pytest error log:
 {error_log}
 
-Provide ONLY the corrected full plugin code for {plugin_name}. 
+Fix ONLY what is necessary to make the tests pass.
 Do not remove working functions or unrelated logic.
+Return the FULL corrected plugin code.
     """
     response = openai_client.ask_executor(prompt)
     return response.get("response_text", "")
@@ -87,8 +93,9 @@ def run():
     return {{"status": "ok", "plugin": "{safe_name}", "purpose": "{purpose}"}}
 ''')
 
+    # ✅ Scaffold tests with correct import style
     with open(test_file, "w") as f:
-        f.write(f'''import {safe_name}
+        f.write(f'''from executor.plugins.{safe_name} import {safe_name}
 
 def test_run():
     result = {safe_name}.run()
@@ -101,21 +108,29 @@ def test_run():
 
     while not passed and retries < max_retries:
         retries += 1
-        with open(main_file, "r", encoding="utf-8") as f: code = f.read()
-        with open(test_file, "r", encoding="utf-8") as f: test_code = f.read()
+        print(f"[Heartbeat] Retry {retries}/{max_retries} for plugin '{safe_name}'... still running.")
+
+        with open(main_file, "r", encoding="utf-8") as f:
+            code = f.read()
+        with open(test_file, "r", encoding="utf-8") as f:
+            test_code = f.read()
+
         patched_code = request_patch(safe_name, code, test_code, output)
 
         if patched_code.strip():
             backup = apply_patch(main_file, patched_code)
             passed, output = run_pytest(test_file)
-            if not passed:  # rollback if patch failed
+            if not passed:
+                print(f"[Heartbeat] Patch attempt {retries} failed — rolling back and retrying.")
                 shutil.move(backup, main_file)
         else:
+            print(f"[Heartbeat] GPT-5 returned no patch on attempt {retries}. Stopping.")
             break
 
     # --- Step 3: Git Commit ---
     if passed:
         success = git_commit_push(safe_name, branch="dev")
+        print(f"[Heartbeat] Plugin '{safe_name}' built successfully and pushed to dev.")
         return {
             "status": "ok",
             "message": f"Plugin '{safe_name}' created and passed tests.",
@@ -123,6 +138,7 @@ def test_run():
             "git_pushed": success
         }
     else:
+        print(f"[Heartbeat] Plugin '{safe_name}' failed after {max_retries} retries. Rolled back.")
         return {
             "status": "error",
             "message": f"Plugin '{safe_name}' failed after {max_retries} retries.",
@@ -130,4 +146,4 @@ def test_run():
         }
 
 if __name__ == "__main__":
-    print(build_plugin("calendar", "Sync with Google Calendar"))
+    print(build_plugin("calendar_plugin", "Sync with Google Calendar"))

@@ -1,5 +1,5 @@
 """
-Extend Plugin with Autotester + Patcher + Git Integration
+Extend Plugin with Autotester + Patcher + Git Integration + Heartbeats
 """
 
 import os
@@ -39,7 +39,12 @@ def git_commit_push(plugin_name: str, branch: str = "dev"):
 def request_patch(plugin_name: str, code: str, test_code: str, error_log: str):
     """Ask GPT-5 to patch code based on failing tests."""
     prompt = f"""
-A plugin named {plugin_name} was extended but failed its tests.
+You are an AI code patcher. A plugin named {plugin_name} was extended but failed its tests.
+
+Important: Plugins live in executor/plugins/<plugin_name>/ 
+and tests must import them using:
+from executor.plugins.<plugin_name> import <plugin_name>
+
 Here is the full plugin code:
 {code}
 
@@ -86,6 +91,10 @@ Here is the current plugin code:
 If tests are provided, ensure the code satisfies them:
 {test_code}
 
+Important: Plugins live in executor/plugins/<plugin_name>/ 
+and tests must import them using:
+from executor.plugins.<plugin_name> import <plugin_name>
+
 Return ONLY the full corrected plugin code.
 Do not remove existing working functions unless necessary.
     """
@@ -94,6 +103,7 @@ Do not remove existing working functions unless necessary.
     new_code = response.get("response_text", "")
 
     if not new_code.strip():
+        print(f"[Heartbeat] No new code generated for plugin '{safe_name}'. Rolled back.")
         return {"status": "error", "message": "No new code generated, rolled back."}
 
     # Write new code
@@ -106,6 +116,8 @@ Do not remove existing working functions unless necessary.
 
     while not passed and retries < max_retries:
         retries += 1
+        print(f"[Heartbeat] Retry {retries}/{max_retries} for plugin '{safe_name}'... still running.")
+
         with open(main_file, "r", encoding="utf-8") as f:
             code = f.read()
         test_code_content = ""
@@ -119,11 +131,15 @@ Do not remove existing working functions unless necessary.
             with open(main_file, "w", encoding="utf-8") as f:
                 f.write(patched_code)
             passed, output = run_pytest(test_file)
+            if not passed:
+                print(f"[Heartbeat] Patch attempt {retries} failed — retrying.")
         else:
+            print(f"[Heartbeat] GPT-5 returned no patch on attempt {retries}. Stopping.")
             break
 
     if passed:
         success = git_commit_push(safe_name, branch="dev")
+        print(f"[Heartbeat] Plugin '{safe_name}' extended successfully and pushed to dev.")
         return {
             "status": "ok",
             "message": f"Plugin '{safe_name}' extended and passed tests.",
@@ -132,6 +148,7 @@ Do not remove existing working functions unless necessary.
         }
     else:
         shutil.move(backup_path, main_file)
+        print(f"[Heartbeat] Extension failed after {max_retries} retries. Rolled back.")
         return {
             "status": "error",
             "message": f"Extension failed after {max_retries} retries. Rolled back.",
