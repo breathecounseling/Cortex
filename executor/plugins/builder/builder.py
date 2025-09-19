@@ -1,5 +1,5 @@
 """
-Builder Plugin with Autotester + Patcher + Git Integration + Heartbeats
+Builder Plugin with Autotester + Patcher + Git Integration + Correct Imports
 """
 
 import os
@@ -27,6 +27,11 @@ def request_patch(plugin_name: str, code: str, test_code: str, error_log: str):
     """Ask GPT-5 (Responses API) to patch code based on failing tests."""
     prompt = f"""
 You are an AI code patcher. A plugin named {plugin_name} failed its tests.
+
+Important: Plugins live in executor/plugins/<plugin_name>/ 
+and tests must import them using:
+from executor.plugins.<plugin_name> import <plugin_name>
+
 Here is the full plugin code:
 {code}
 
@@ -88,6 +93,7 @@ def run():
     return {{"status": "ok", "plugin": "{safe_name}", "purpose": "{purpose}"}}
 ''')
 
+    # ✅ Scaffold tests with correct import style
     with open(test_file, "w") as f:
         f.write(f'''from executor.plugins.{safe_name} import {safe_name}
 
