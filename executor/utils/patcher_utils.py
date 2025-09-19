@@ -5,7 +5,6 @@ Patcher Utilities with Diff Mode + Partial Fixes + Heartbeats
 import subprocess
 import shutil
 import os
-from executor.connectors import openai_client
 
 
 def run_pytest(test_file: str):
@@ -24,8 +23,8 @@ def run_pytest(test_file: str):
         return False, e.stdout + "\n" + e.stderr, fails
 
 
-def request_patch(plugin_name: str, code: str, test_code: str, error_log: str, last_patch: str = ""):
-    """Ask GPT-5 for an improved version of the plugin code."""
+def request_patch(plugin_name: str, code: str, test_code: str, error_log: str, ask_executor, last_patch: str = ""):
+    """Ask GPT-5 for an improved version of the plugin code using the provided ask_executor."""
     prompt = f"""
 You are an AI code patcher. A plugin named {plugin_name} failed its tests.
 
@@ -49,11 +48,11 @@ Fix ONLY what is necessary to make the tests pass.
 Do not remove working functions or unrelated logic.
 Return the FULL corrected plugin code (not a diff).
     """
-    response = openai_client.ask_executor(prompt)
+    response = ask_executor(prompt)
     return response.get("response_text", "")
 
 
-def iterative_patch(plugin_name, main_file, test_file, max_retries=3):
+def iterative_patch(plugin_name, main_file, test_file, ask_executor, max_retries=3):
     """Iteratively patch plugin until tests pass or retries exhausted."""
     backup_path = main_file + ".bak"
     shutil.copy(main_file, backup_path)
@@ -75,7 +74,7 @@ def iterative_patch(plugin_name, main_file, test_file, max_retries=3):
         retries += 1
         print(f"[Heartbeat] Retry {retries}/{max_retries} for {plugin_name}, {fails} failures remain.")
 
-        patched_code = request_patch(plugin_name, code, test_code, output, last_patch)
+        patched_code = request_patch(plugin_name, code, test_code, output, ask_executor, last_patch)
         if not patched_code.strip():
             print("[Heartbeat] No patch returned — stopping.")
             break
