@@ -5,6 +5,7 @@ Builder Plugin with Autotester + Iterative Patcher + Git Integration + Heartbeat
 import os
 import subprocess
 from executor.utils.patcher_utils import iterative_patch
+from executor.connectors import openai_client  # ✅ imported only here
 
 PLUGIN_BASE = os.path.join(os.path.dirname(__file__), "..")
 
@@ -54,7 +55,13 @@ def test_run():
 ''')
 
     # --- Test + Patch Loop ---
-    passed, output = iterative_patch(safe_name, main_file, test_file, max_retries=max_retries)
+    passed, output = iterative_patch(
+        safe_name,
+        main_file,
+        test_file,
+        openai_client.ask_executor,   # ✅ inject ask_executor here
+        max_retries=max_retries
+    )
 
     # --- Commit ---
     if passed:
