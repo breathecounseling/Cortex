@@ -1304,6 +1304,151 @@ def get_summarization_stats() -> dict:
 
 
 # -------------------------
+# ask_executor Integration
+# -------------------------
+
+_history_window_size_default = 10
+_history_window_size = _history_window_size_default
+_ask_executor_backend: _t.Optional[_t.Callable[..., _t.Any]] = None
+
+def set_history_window_size(n: int) -> None:
+    """
+    Set default history window size for ask_executor integration.
+    """
+    global _history_window_size
+    try:
+        n = int(n)
+    except Exception:
+        return
+    if n <= 0:
+        n = 0
+    _history_window_size = n
+
+def get_history_window_size() -> int:
+    """
+    Get default history window size for ask_executor integration.
+    """
+    return int(_history_window_size)
+
+def set_ask_executor_backend(fn: _t.Callable[..., _t.Any]) -> None:
+    """
+    Set the underlying ask_executor function to delegate to.
+    """
+    global _ask_executor_backend
+    _ask_executor_backend = fn
+
+def _record_to_message(rec: dict) -> dict:
+    return {
+        "role": _infer_role(rec),
+        "content": "" if rec.get("text") is None else str(rec.get("text")),
+    }
+
+def _normalize_current_messages(prompt: _t.Optional[_t.Any], messages: _t.Optional[_t.Sequence[dict]]) -> _t.List[dict]:
+    if isinstance(messages, (list, tuple)) and messages:
+        # Shallow-coerce to {role, content}
+        out: _t.List[dict] = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "").strip().lower() or "user"
+            content = "" if m.get("content") is None else str(m.get("content"))
+            out.append({"role": role, "content": content})
+        return out
+    # Fallback to prompt string as a single user message
+    if prompt is None:
+        return []
+    return [{"role": "user", "content": str(prompt)}]
+
+def ask_executor(
+    prompt: _t.Optional[_t.Any] = None,
+    *,
+    messages: _t.Optional[_t.Sequence[dict]] = None,
+    session_id: _t.Optional[_t.Any] = None,
+    conversation_id: _t.Optional[_t.Any] = None,
+    conversationId: _t.Optional[_t.Any] = None,
+    include_history: bool = True,
+    history_window_size: _t.Optional[int] = None,
+    include_types: _t.Optional[_t.Iterable[str]] = None,
+    **kwargs,
+) -> _t.Any:
+    """
+    Wrapper around the configured ask_executor backend that:
+    1) Fetches up to last N messages from the active conversation history,
+    2) Transforms them into [{role, content}],
+    3) Builds the final messages as [history..., current_prompt/messages],
+    4) Calls the backend with the combined messages.
+
+    Behavior:
+    - If fewer than N messages exist, include all available.
+    - If none exist or retrieval fails, forward the current prompt/messages as-is.
+    - Avoid duplicating the current prompt (drop last history msg if same role+content as current last).
+    - Maintain chronological order (oldest ... newest).
+    - include_history=False disables history inclusion for this call.
+
+    Configuration:
+    - Default window is 10; override per call via history_window_size or globally via set_history_window_size().
+    """
+    if _ask_executor_backend is None:
+        raise RuntimeError("[conversation_manager] ask_executor backend is not configured. Set via set_ask_executor_backend(fn).")
+
+    # Resolve conversation/session id preference
+    sid = session_id
+    if sid is None:
+        sid = conversation_id if conversation_id is not None else conversationId
+
+    # Normalize current prompt/messages
+    current_msgs = _normalize_current_messages(prompt, messages)
+
+    # If history disabled or window size is zero, just forward current
+    n_hist = _history_window_size if (history_window_size is None) else max(0, int(history_window_size))
+    if not include_history or n_hist <= 0:
+        try:
+            # Prefer messages API for backend
+            return _ask_executor_backend(messages=current_msgs, **kwargs)
+        except TypeError:
+            # Fallback: if backend doesn't accept messages, try prompt (join user contents)
+            joined = "\n\n".join(m.get("content", "") for m in current_msgs)
+            return _ask_executor_backend(prompt=joined, **kwargs)
+
+    # Fetch history and transform; gracefully degrade on error
+    history_msgs: _t.List[dict] = []
+    try:
+        recs = get_recent_messages(n=n_hist, session_id=sid, include_types=include_types)
+        # Transform to [{role, content}]
+        history_msgs = [_record_to_message(r) for r in recs]
+    except Exception as e:
+        _debug(f"[conversation_manager] History retrieval failed, degrading to current prompt. Error: {e}")
+        history_msgs = []
+
+    # Avoid duplicating the current prompt: if last history equals last current
+    if history_msgs and current_msgs:
+        h_last = history_msgs[-1]
+        c_last = current_msgs[-1]
+        try:
+            if (str(h_last.get("role")).strip().lower() == str(c_last.get("role")).strip().lower() and
+                (h_last.get("content") or "").strip() == (c_last.get("content") or "").strip()):
+                history_msgs = history_msgs[:-1]
+        except Exception:
+            # If any issue comparing, keep history as-is
+            pass
+
+    combined = list(history_msgs) + list(current_msgs)
+
+    # Dispatch to backend with combined prompt/messages
+    try:
+        return _ask_executor_backend(messages=combined, **kwargs)
+    except TypeError:
+        # Backend might expect a string prompt; combine into a single prompt string
+        # Format as simple concatenation of role-tagged lines
+        def _format_message(m: dict) -> str:
+            role = (m.get("role") or "user").strip().lower()
+            content = "" if m.get("content") is None else str(m.get("content"))
+            return f"{role}: {content}"
+        joined = "\n".join(_format_message(m) for m in combined)
+        return _ask_executor_backend(prompt=joined, **kwargs)
+
+
+# -------------------------
 # Backward-compatible run()
 # -------------------------
 
@@ -1341,4 +1486,9 @@ __all__ = [
     "getLatestSummary",
     "loadWithSummary",
     "get_summarization_stats",
+    # ask_executor integration
+    "ask_executor",
+    "set_ask_executor_backend",
+    "set_history_window_size",
+    "get_history_window_size",
 ]
