@@ -353,6 +353,116 @@ def clear_history(remove_rotations: bool = True) -> bool:
 
 
 # -------------------------
+# New feature: Prepend last N messages to a prompt
+# -------------------------
+
+def get_recent_messages(n: int, session_id: _t.Optional[_t.Any] = None, include_types: _t.Optional[_t.Iterable[str]] = None) -> _t.List[dict]:
+    """
+    Load the last N messages from the JSON history, optionally filtered by session_id and types.
+
+    - n: number of records to return (last N).
+    - session_id: if provided, only records matching this sessionId are returned.
+    - include_types: iterable of types to include (e.g., {"input", "output"}). Defaults to both.
+    Returns records ordered from oldest to newest among the last N.
+    """
+    if not isinstance(n, int) or n <= 0:
+        return []
+    types_set = None
+    if include_types is not None:
+        try:
+            types_set = {str(t).lower() for t in include_types}
+        except Exception:
+            types_set = None
+    # Pull last N plus some slack if filtering by session/types to increase chances of getting N
+    # We'll keep it simple and start with exactly N, then, if filtering reduces below N, attempt to read more by increasing limit.
+    # Since list_history doesn't support reading rotated files, we'll only do a single read of the file and accept fewer than N if filters exclude many.
+    records = list_history(limit=max(n, 1))
+    # If filtered result is smaller than n but file likely contains more, we can't fetch more without re-reading full file.
+    # list_history(limit=None) would be too heavy for large files, so prefer best-effort behavior.
+    if session_id is not None:
+        sid = str(session_id)
+        records = [r for r in records if r.get("sessionId") == sid]
+    if types_set is not None:
+        records = [r for r in records if str(r.get("type", "")).lower() in types_set]
+    # If filtering reduced below n, and we initially limited to n, try reading entire file once to improve results.
+    if len(records) < n:
+        all_records = list_history(limit=None)
+        if session_id is not None:
+            sid = str(session_id)
+            all_records = [r for r in all_records if r.get("sessionId") == sid]
+        if types_set is not None:
+            all_records = [r for r in all_records if str(r.get("type", "")).lower() in types_set]
+        records = all_records[-n:] if n < len(all_records) else all_records
+    return records[-n:] if n < len(records) else records
+
+
+def prepend_history_to_prompt(
+    prompt: _t.Any,
+    n: int = 10,
+    session_id: _t.Optional[_t.Any] = None,
+    include_types: _t.Optional[_t.Iterable[str]] = None,
+    include_timestamps: bool = False,
+    header: _t.Optional[str] = "History:"
+) -> str:
+    """
+    Build a new prompt string with the last N messages from history prepended.
+
+    - prompt: the current prompt string to prepend to.
+    - n: number of messages to include.
+    - session_id: optional session filter.
+    - include_types: optional iterable of types to include (defaults to {"input","output"}).
+    - include_timestamps: include ISO timestamps in the history lines if True.
+    - header: optional header string placed before the history block. Use None or "" to omit.
+    """
+    base_prompt = "" if prompt is None else str(prompt)
+    records = get_recent_messages(n=n, session_id=session_id, include_types=include_types)
+    if not records:
+        return base_prompt
+    lines: _t.List[str] = []
+    for r in records:
+        typ = str(r.get("type", ""))
+        txt = "" if r.get("text") is None else str(r.get("text"))
+        if include_timestamps:
+            ts = str(r.get("timestamp", ""))
+            line = f"[{ts}] {typ}: {txt}"
+        else:
+            line = f"{typ}: {txt}"
+        lines.append(line)
+    parts: _t.List[str] = []
+    if header:
+        parts.append(str(header))
+    parts.extend(lines)
+    history_block = "\n".join(parts).strip()
+    if not history_block:
+        return base_prompt
+    if base_prompt:
+        return f"{history_block}\n\n{base_prompt}"
+    else:
+        return history_block
+
+
+def prepend_last_messages_to_prompt(
+    prompt: _t.Any,
+    n: int = 10,
+    session_id: _t.Optional[_t.Any] = None,
+    include_types: _t.Optional[_t.Iterable[str]] = None,
+    include_timestamps: bool = False,
+    header: _t.Optional[str] = "History:"
+) -> str:
+    """
+    Alias for prepend_history_to_prompt for convenience/compatibility.
+    """
+    return prepend_history_to_prompt(
+        prompt=prompt,
+        n=n,
+        session_id=session_id,
+        include_types=include_types,
+        include_timestamps=include_timestamps,
+        header=header,
+    )
+
+
+# -------------------------
 # Backward-compatible run()
 # -------------------------
 
@@ -375,4 +485,7 @@ __all__ = [
     "append_record",
     "list_history",
     "clear_history",
+    "get_recent_messages",
+    "prepend_history_to_prompt",
+    "prepend_last_messages_to_prompt",
 ]
