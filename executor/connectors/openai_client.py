@@ -1,19 +1,20 @@
 """
 OpenAI Responses API connector for Executor with persistent memory integration,
-error handling, and budget usage logging.
+error handling, budget usage logging, and self-repair on failures.
 """
 
 import os
 import math
 from typing import Any, Dict, List
 from dotenv import load_dotenv
-from openai import OpenAI
-from openai.error import OpenAIError
+from openai import OpenAI, OpenAIError
 
-# Memory helpers (simplified conversation manager)
+# Memory helpers
 from executor.plugins.conversation_manager import conversation_manager as cm
-# Budget monitor (new plugin)
+# Budget monitor
 from executor.plugins.budget_monitor import budget_monitor
+# Self-repair
+from executor.utils import self_repair
 
 # Load .env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -22,33 +23,39 @@ if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY missing from .env")
 
 # Models
-REPL_MODEL = os.environ.get("CORTEX_REPL_MODEL", "gpt-4o-mini")   # fast & cheap for REPL
-HEAVY_MODEL = os.environ.get("CORTEX_HEAVY_MODEL", "gpt-5")       # use for big builds if needed
+REPL_MODEL = os.environ.get("CORTEX_REPL_MODEL", "gpt-4o-mini")   # fast & cheap
+HEAVY_MODEL = os.environ.get("CORTEX_HEAVY_MODEL", "gpt-5")       # heavy lifting
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 def _estimate_tokens_from_messages(messages: List[Dict[str, str]]) -> int:
-    # fallback estimator if API doesn't return usage
     if not messages:
         return 0
     chars = sum(len(m.get("content") or "") for m in messages)
-    return max(1, math.ceil(chars / 4))  # ~4 chars/token heuristic
+    return max(1, math.ceil(chars / 4))
 
 
-def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = False) -> Dict[str, Any]:
+def _call_model(messages: List[Dict[str, str]], model: str) -> Any:
+    return client.responses.create(
+        model=model,
+        input=messages,
+        store=False,
+    )
+
+
+def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = False, _retry_on_repair: bool = True) -> Dict[str, Any]:
     """
     Ask GPT with persistent memory:
       - Builds messages with handle_repl_turn (system facts + user input)
-      - Calls Responses API (fast model by default; heavy model if heavy=True)
+      - Calls Responses API
       - Records assistant reply
-      - Logs token usage to budget_monitor
-      - Returns structured result or error dict
+      - Logs tokens to budget
+      - On error, triggers self-repair once and retries the same prompt
     """
     model = HEAVY_MODEL if heavy else REPL_MODEL
 
-    try:
-        # Build turn with prior history (bullet facts in system + new user input)
+    def _one_turn() -> Dict[str, Any]:
         turn = cm.handle_repl_turn(
             current_input=prompt,
             history=cm.get_history(plugin_name),
@@ -58,17 +65,11 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
         messages = turn["messages"]
         if not messages:
             raise RuntimeError("[ask_executor] No messages built")
+        resp = _call_model(messages, model=model)
 
-        # Call GPT
-        resp = client.responses.create(
-            model=model,
-            input=messages,
-            store=False,
-        )
-
-        # Extract assistant text
         out_text = getattr(resp, "output_text", None) or ""
         if not out_text:
+            # defensive parse
             try:
                 for item in resp.output:
                     if getattr(item, "type", "") == "message":
@@ -79,11 +80,9 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
             except Exception:
                 pass
 
-        # Persist assistant reply
         cm.record_assistant(plugin_name, out_text)
 
-        # Budget usage logging
-        # Prefer API usage; fallback to rough estimate
+        # budget logging
         used_tokens = 0
         try:
             u = getattr(resp, "usage", None)
@@ -101,7 +100,7 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
         try:
             budget_monitor.record_usage(used_tokens)
         except Exception:
-            pass  # never block REPL on budget write
+            pass
 
         return {
             "status": "ok",
@@ -110,15 +109,24 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
             "raw": resp,
         }
 
+    try:
+        return _one_turn()
+
     except OpenAIError as e:
-        return {
-            "status": "error",
-            "error_type": "OpenAIError",
-            "message": str(e),
-        }
+        # Attempt self-repair once, then retry
+        err_ctx = {"error_type": "OpenAIError", "message": str(e)}
+        if _retry_on_repair:
+            repair = self_repair.attempt_self_repair(err_ctx)
+            if repair.get("status") == "ok":
+                # try once more, no infinite recursion
+                return ask_executor(prompt, plugin_name=plugin_name, heavy=heavy, _retry_on_repair=False)
+        return {"status": "error", **err_ctx}
+
     except Exception as e:
-        return {
-            "status": "error",
-            "error_type": type(e).__name__,
-            "message": str(e),
-        }
+        # Attempt self-repair once, then retry
+        err_ctx = {"error_type": type(e).__name__, "message": str(e)}
+        if _retry_on_repair:
+            repair = self_repair.attempt_self_repair(err_ctx)
+            if repair.get("status") == "ok":
+                return ask_executor(prompt, plugin_name=plugin_name, heavy=heavy, _retry_on_repair=False)
+        return {"status": "error", **err_ctx}
