@@ -1,8 +1,19 @@
 """
-Plugin: task_planner
-Purpose: Break down vague or high-level user requests into clear, actionable subtasks and plans. The plugin extracts goals, constraints, assumptions, and success criteria; identifies ambiguities; generates clarifying questions; and outputs a structured, dependency-aware task plan suitable for execution by other plugins or humans.
+Task Planner plugin
+Accepts a goal string and returns a list of subtasks (stub).
 """
 
+def plan(goal: str) -> dict:
+    """Simple starter plan — Extender will improve this."""
+    g = (goal or "").strip()
+    return {
+        "goal": g,
+        "subtasks": [
+            {"id": 1, "title": f"Research: {g}"},
+            {"id": 2, "title": f"Draft: {g}"},
+            {"id": 3, "title": f"Review & refine: {g}"},
+        ],
+    }
+
 def run():
-    print("[task_planner] Running placeholder task.")
-    return {"status": "ok", "plugin": "task_planner", "purpose": "Break down vague or high-level user requests into clear, actionable subtasks and plans. The plugin extracts goals, constraints, assumptions, and success criteria; identifies ambiguities; generates clarifying questions; and outputs a structured, dependency-aware task plan suitable for execution by other plugins or humans."}
+    return {"status": "ok", "plugin": "task_planner", "purpose": "Break goals into subtasks (stub)."}
