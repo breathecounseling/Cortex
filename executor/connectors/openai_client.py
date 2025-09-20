@@ -1,20 +1,65 @@
 """
 OpenAI Responses API connector for Executor with persistent memory integration,
-error handling, budget usage logging, and self-repair on failures.
+error handling, budget usage logging, and self-repair for import-time failures.
 """
 
 import os
 import math
+import json
 from typing import Any, Dict, List
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 
-# Memory helpers
-from executor.plugins.conversation_manager import conversation_manager as cm
-# Budget monitor
-from executor.plugins.budget_monitor import budget_monitor
-# Self-repair
-from executor.utils import self_repair
+from executor.plugins.builder import builder, extend_plugin
+
+TOOLS = [
+    {
+        "type": "function",
+        "name": "build_plugin",
+        "description": "Create a new Executor plugin.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plugin_name": {"type": "string"},
+                "purpose": {"type": "string"}
+            },
+            "required": ["plugin_name", "purpose"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "extend_plugin",
+        "description": "Extend an existing Executor plugin with a new feature.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plugin_name": {"type": "string"},
+                "new_feature": {"type": "string"}
+            },
+            "required": ["plugin_name", "new_feature"]
+        }
+    }
+]
+
+# --- Bootstrap self-repair for imports ---
+try:
+    from executor.plugins.conversation_manager import conversation_manager as cm
+    from executor.plugins.budget_monitor import budget_monitor
+except ModuleNotFoundError as e:
+    try:
+        from executor.utils import self_repair
+        print(f"[self-repair] Import failed: {e}. Attempting repair...")
+        repair = self_repair.attempt_self_repair({"message": str(e)})
+        if repair.get("status") == "ok":
+            print(f"[self-repair] Repair applied to {repair.get('file')}, retrying import...")
+            from executor.plugins.conversation_manager import conversation_manager as cm
+            from executor.plugins.budget_monitor import budget_monitor
+        else:
+            print(f"[self-repair] Repair failed: {repair}")
+            raise
+    except Exception as inner_e:
+        print(f"[self-repair] Fatal import error: {inner_e}")
+        raise
 
 # Load .env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -40,6 +85,7 @@ def _call_model(messages: List[Dict[str, str]], model: str) -> Any:
     return client.responses.create(
         model=model,
         input=messages,
+        tools=TOOLS,
         store=False,
     )
 
@@ -65,11 +111,33 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
         messages = turn["messages"]
         if not messages:
             raise RuntimeError("[ask_executor] No messages built")
+
         resp = _call_model(messages, model=model)
 
+        # --- Tool call handling ---
+        for item in getattr(resp, "output", []):
+            if getattr(item, "type", "") == "function_call":
+                name = getattr(item, "name", "")
+                args = {}
+                try:
+                    args = json.loads(item.arguments)
+                except Exception:
+                    pass
+
+                if name == "build_plugin":
+                    return builder.build_plugin(
+                        plugin_name=args.get("plugin_name", ""),
+                        purpose=args.get("purpose", "")
+                    )
+                elif name == "extend_plugin":
+                    return extend_plugin.extend_plugin(
+                        plugin_name=args.get("plugin_name", ""),
+                        new_feature=args.get("new_feature", "")
+                    )
+
+        # --- Fallback to text output ---
         out_text = getattr(resp, "output_text", None) or ""
         if not out_text:
-            # defensive parse
             try:
                 for item in resp.output:
                     if getattr(item, "type", "") == "message":
@@ -113,19 +181,18 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
         return _one_turn()
 
     except OpenAIError as e:
-        # Attempt self-repair once, then retry
         err_ctx = {"error_type": "OpenAIError", "message": str(e)}
         if _retry_on_repair:
+            from executor.utils import self_repair
             repair = self_repair.attempt_self_repair(err_ctx)
             if repair.get("status") == "ok":
-                # try once more, no infinite recursion
                 return ask_executor(prompt, plugin_name=plugin_name, heavy=heavy, _retry_on_repair=False)
         return {"status": "error", **err_ctx}
 
     except Exception as e:
-        # Attempt self-repair once, then retry
         err_ctx = {"error_type": type(e).__name__, "message": str(e)}
         if _retry_on_repair:
+            from executor.utils import self_repair
             repair = self_repair.attempt_self_repair(err_ctx)
             if repair.get("status") == "ok":
                 return ask_executor(prompt, plugin_name=plugin_name, heavy=heavy, _retry_on_repair=False)
