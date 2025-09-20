@@ -8,7 +8,7 @@ import math
 from typing import Any, Dict, List
 from dotenv import load_dotenv
 from openai import OpenAI
-from openai.error import OpenAIError
+from openai import OpenAIError
 
 # Memory helpers (simplified conversation manager)
 from executor.plugins.conversation_manager import conversation_manager as cm
