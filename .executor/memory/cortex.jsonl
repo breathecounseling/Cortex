@@ -2,3 +2,6 @@
 {"timestamp": "2025-09-20T00:56:17+00:00", "role": "assistant", "content": "Got it—I’ll remember that your favorite color is green. Want me to remember anything else?", "metadata": {}}
 {"timestamp": "2025-09-20T00:56:17+00:00", "role": "user", "content": "What is my favorite color?", "metadata": {}}
 {"timestamp": "2025-09-20T00:56:19+00:00", "role": "assistant", "content": "Your favorite color is green.", "metadata": {}}
+{"timestamp": "2025-09-20T17:53:17+00:00", "role": "user", "content": "what is my favorite food", "metadata": {}}
+{"timestamp": "2025-09-20T17:53:19+00:00", "role": "assistant", "content": "I don't have that information yet. What is your favorite food?", "metadata": {}}
+{"timestamp": "2025-09-20T17:53:22+00:00", "role": "user", "content": "shrimp", "metadata": {}}
