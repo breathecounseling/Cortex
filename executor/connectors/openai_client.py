@@ -122,12 +122,3 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
             "error_type": type(e).__name__,
             "message": str(e),
         }
-
-
-if __name__ == "__main__":
-    # Remove this block if you don't want a test run when executing directly.
-    print("Test run:")
-    r1 = ask_executor("Remember this: my favorite color is green")
-    print("Assistant:", r1.get("assistant_output"))
-    r2 = ask_executor("What is my favorite color?")
-    print("Assistant:", r2.get("assistant_output"))
