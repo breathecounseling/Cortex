@@ -1,10 +1,13 @@
 """
-Patcher Utilities with Diff Mode + Partial Fixes + Heartbeats
+Patcher Utilities with Repo Awareness, Diff Mode, Partial Fixes, and Heartbeats
 """
 
 import subprocess
 import shutil
 import os
+import time
+import json
+from executor.plugins.repo_analyzer import repo_analyzer
 
 
 def run_pytest(test_file: str):
@@ -14,17 +17,48 @@ def run_pytest(test_file: str):
             ["python", "-m", "pytest", "-q", test_file],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         return True, result.stdout, 0
     except subprocess.CalledProcessError as e:
-        # Count how many tests failed
         fails = e.stdout.count("FAILED") + e.stdout.count("ERROR")
         return False, e.stdout + "\n" + e.stderr, fails
 
 
-def request_patch(plugin_name: str, code: str, test_code: str, error_log: str, ask_executor, last_patch: str = ""):
-    """Ask GPT-5 for an improved version of the plugin code using the provided ask_executor."""
+def gather_related_files(error_log: str) -> dict:
+    """
+    Use repo_analyzer to pull in related files when errors suggest cross-file issues.
+    """
+    analysis = repo_analyzer.analyze_repo("executor")
+    related = {}
+    # Look for missing imports, attributes, or functions
+    for path, info in analysis.items():
+        symbols = info.get("functions", []) + info.get("classes", [])
+        if any(sym in error_log for sym in symbols):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    related[path] = f.read()
+            except Exception:
+                continue
+    return related
+
+
+def request_patch(
+    plugin_name: str,
+    code: str,
+    test_code: str,
+    error_log: str,
+    ask_executor,
+    last_patch: str = "",
+    related_files: dict | None = None,
+):
+    """Ask GPT for an improved version of the plugin code using ask_executor."""
+    context = ""
+    if related_files:
+        context = "\n\n# Related repo context:\n" + "\n\n".join(
+            f"### {path}\n{content}" for path, content in related_files.items()
+        )
+
     prompt = f"""
 You are an AI code patcher. A plugin named {plugin_name} failed its tests.
 
@@ -44,45 +78,63 @@ Here is the pytest error log:
 If a previous patch was attempted, here it is:
 {last_patch}
 
+{context}
+
 Fix ONLY what is necessary to make the tests pass.
 Do not remove working functions or unrelated logic.
 Return the FULL corrected plugin code (not a diff).
     """
+
     response = ask_executor(prompt)
     return response.get("response_text", "")
 
 
-def iterative_patch(plugin_name, main_file, test_file, ask_executor, max_retries=3):
+def iterative_patch(
+    plugin_name,
+    main_file,
+    test_file,
+    ask_executor,
+    max_retries=3,
+):
     """Iteratively patch plugin until tests pass or retries exhausted."""
     backup_path = main_file + ".bak"
     shutil.copy(main_file, backup_path)
 
     with open(main_file, "r", encoding="utf-8") as f:
         code = f.read()
+
     test_code = ""
     if os.path.exists(test_file):
         with open(test_file, "r", encoding="utf-8") as f:
             test_code = f.read()
 
     last_patch = ""
-    last_fail_count = float("inf")
-
-    passed, output, fails = run_pytest(test_file) if os.path.exists(test_file) else (True, "No tests", 0)
+    passed, output, fails = (
+        run_pytest(test_file) if os.path.exists(test_file) else (True, "No tests", 0)
+    )
 
     retries = 0
     while not passed and retries < max_retries:
         retries += 1
         print(f"[Heartbeat] Retry {retries}/{max_retries} for {plugin_name}, {fails} failures remain.")
 
-        patched_code = request_patch(plugin_name, code, test_code, output, ask_executor, last_patch)
+        related_files = gather_related_files(output)
+        patched_code = request_patch(
+            plugin_name,
+            code,
+            test_code,
+            output,
+            ask_executor,
+            last_patch,
+            related_files,
+        )
+
         if not patched_code.strip():
             print("[Heartbeat] No patch returned — stopping.")
             break
 
-        # Save this patch for context
         last_patch = patched_code
 
-        # Write new code
         with open(main_file, "w", encoding="utf-8") as f:
             f.write(patched_code)
 
