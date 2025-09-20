@@ -1,115 +1,133 @@
 """
-OpenAI Responses API connector for Executor.
-Registers Builder and Extender as tools and provides ask_executor().
+OpenAI Responses API connector for Executor with persistent memory integration,
+error handling, and budget usage logging.
 """
 
 import os
-import json
+import math
+from typing import Any, Dict, List
 from dotenv import load_dotenv
 from openai import OpenAI
+from openai.error import OpenAIError
 
-# Load .env from repo root
+# Memory helpers (simplified conversation manager)
+from executor.plugins.conversation_manager import conversation_manager as cm
+# Budget monitor (new plugin)
+from executor.plugins.budget_monitor import budget_monitor
+
+# Load .env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "../../.env"))
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY missing from .env")
 
+# Models
+REPL_MODEL = os.environ.get("CORTEX_REPL_MODEL", "gpt-4o-mini")   # fast & cheap for REPL
+HEAVY_MODEL = os.environ.get("CORTEX_HEAVY_MODEL", "gpt-5")       # use for big builds if needed
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Import Builder and Extender
-from executor.plugins.builder import builder, extend_plugin
 
-# Tool registry
-TOOLS = [
-    {
-        "type": "function",
-        "name": "build_plugin",
-        "description": "Create a new Executor plugin.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {"type": "string"},
-                "purpose": {"type": "string"}
-            },
-            "required": ["plugin_name", "purpose"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "extend_plugin",
-        "description": "Extend an existing Executor plugin with a new feature.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {"type": "string"},
-                "new_feature": {"type": "string"}
-            },
-            "required": ["plugin_name", "new_feature"]
-        }
-    }
-]
+def _estimate_tokens_from_messages(messages: List[Dict[str, str]]) -> int:
+    # fallback estimator if API doesn't return usage
+    if not messages:
+        return 0
+    chars = sum(len(m.get("content") or "") for m in messages)
+    return max(1, math.ceil(chars / 4))  # ~4 chars/token heuristic
 
-SYSTEM_INSTRUCTIONS = (
-    "You are Cortex Executor, an AI system that writes and edits plugins. "
-    "If the user request is vague, ask clarifying questions. "
-    "When calling tools, provide the correct parameters. "
-    "When fixing code, preserve all working functions and only fix broken ones. "
-    "When outputting code, return ONLY the complete corrected file."
-)
 
-def ask_executor(prompt: str, thread_id: str = "default"):
+def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = False) -> Dict[str, Any]:
     """
-    High-level interface to the OpenAI Responses API.
-    Routes natural language input to freeform responses or tool calls.
+    Ask GPT with persistent memory:
+      - Builds messages with handle_repl_turn (system facts + user input)
+      - Calls Responses API (fast model by default; heavy model if heavy=True)
+      - Records assistant reply
+      - Logs token usage to budget_monitor
+      - Returns structured result or error dict
     """
-    response = client.responses.create(
-        model="gpt-5",
-        instructions=SYSTEM_INSTRUCTIONS,
-        input=prompt,
-        tools=TOOLS,
-        store=False
-    )
+    model = HEAVY_MODEL if heavy else REPL_MODEL
 
-    # Default result
-    out_text = getattr(response, "output_text", None) or ""
-    result = {"status": "ok", "response_text": out_text, "raw": response}
+    try:
+        # Build turn with prior history (bullet facts in system + new user input)
+        turn = cm.handle_repl_turn(
+            current_input=prompt,
+            history=cm.get_history(plugin_name),
+            session=plugin_name,
+            limit=10,
+        )
+        messages = turn["messages"]
+        if not messages:
+            raise RuntimeError("[ask_executor] No messages built")
 
-    # Inspect function calls
-    for item in response.output:
-        if item.type == "function_call":
+        # Call GPT
+        resp = client.responses.create(
+            model=model,
+            input=messages,
+            store=False,
+        )
+
+        # Extract assistant text
+        out_text = getattr(resp, "output_text", None) or ""
+        if not out_text:
             try:
-                args = json.loads(item.arguments)
+                for item in resp.output:
+                    if getattr(item, "type", "") == "message":
+                        for c in item.content:
+                            if getattr(c, "type", "") == "output_text":
+                                out_text = c.text or ""
+                                break
             except Exception:
-                args = {}
+                pass
 
-            if item.name == "build_plugin":
-                return builder.build_plugin(
-                    plugin_name=args.get("plugin_name", ""),
-                    purpose=args.get("purpose", "")
-                )
-            elif item.name == "extend_plugin":
-                return extend_plugin.extend_plugin(
-                    plugin_name=args.get("plugin_name", ""),
-                    new_feature=args.get("new_feature", "")
-                )
+        # Persist assistant reply
+        cm.record_assistant(plugin_name, out_text)
 
-            result = {
-                "status": "function_call",
-                "name": item.name,
-                "arguments": args,
-                "raw": response
-            }
-            break
+        # Budget usage logging
+        # Prefer API usage; fallback to rough estimate
+        used_tokens = 0
+        try:
+            u = getattr(resp, "usage", None)
+            if u:
+                used_tokens = int(getattr(u, "total_tokens", 0) or 0)
+                if not used_tokens:
+                    it = int(getattr(u, "input_tokens", 0) or 0)
+                    ot = int(getattr(u, "output_tokens", 0) or 0)
+                    used_tokens = it + ot
+            if not used_tokens:
+                used_tokens = _estimate_tokens_from_messages(messages + [{"role": "assistant", "content": out_text}])
+        except Exception:
+            used_tokens = _estimate_tokens_from_messages(messages + [{"role": "assistant", "content": out_text}])
 
-    return result
+        try:
+            budget_monitor.record_usage(used_tokens)
+        except Exception:
+            pass  # never block REPL on budget write
+
+        return {
+            "status": "ok",
+            "assistant_output": out_text,
+            "messages": messages,
+            "raw": resp,
+        }
+
+    except OpenAIError as e:
+        return {
+            "status": "error",
+            "error_type": "OpenAIError",
+            "message": str(e),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "message": str(e),
+        }
 
 
 if __name__ == "__main__":
-    print("Cortex Executor REPL (type 'quit' to exit)")
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() in ["quit", "exit"]:
-            break
-        output = ask_executor(user_input)
-        print("Executor:", output)
+    # Remove this block if you don't want a test run when executing directly.
+    print("Test run:")
+    r1 = ask_executor("Remember this: my favorite color is green")
+    print("Assistant:", r1.get("assistant_output"))
+    r2 = ask_executor("What is my favorite color?")
+    print("Assistant:", r2.get("assistant_output"))
