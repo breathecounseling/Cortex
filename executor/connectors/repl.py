@@ -12,10 +12,19 @@ def main():
             if not user or user.lower() in ("quit", "exit"):
                 break
             result = ask_executor(user)
-            if result.get("status") == "ok":
+
+            # Handle chat responses
+            if result.get("status") == "ok" and "assistant_output" in result:
                 print("Executor:", result["assistant_output"])
+
+            # Handle builder/extender/tool responses
+            elif result.get("status") in ("ok", "function_call"):
+                print("Executor [tool]:", result.get("message") or result)
+
+            # Handle errors
             else:
-                print("Executor [error]:", result.get("message"))
+                print("Executor [error]:", result.get("message") or result)
+
         except (KeyboardInterrupt, EOFError):
             break
 
