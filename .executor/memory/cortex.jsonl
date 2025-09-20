@@ -1,0 +1,4 @@
+{"timestamp": "2025-09-20T00:56:12+00:00", "role": "user", "content": "Remember this: my favorite color is green", "metadata": {}}
+{"timestamp": "2025-09-20T00:56:17+00:00", "role": "assistant", "content": "Got it—I’ll remember that your favorite color is green. Want me to remember anything else?", "metadata": {}}
+{"timestamp": "2025-09-20T00:56:17+00:00", "role": "user", "content": "What is my favorite color?", "metadata": {}}
+{"timestamp": "2025-09-20T00:56:19+00:00", "role": "assistant", "content": "Your favorite color is green.", "metadata": {}}
