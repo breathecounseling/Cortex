@@ -1,10 +1,11 @@
 """
-Extend Plugin with Iterative Patcher + Git Integration + Heartbeats
+Extend Plugin with Iterative Patcher + Git Integration + Heartbeats + Verbose Errors
 """
 
 import os
 import subprocess
 import shutil
+import traceback
 from executor.utils.patcher_utils import iterative_patch
 from executor.connectors import openai_client  # ✅ imported only here
 
@@ -21,7 +22,8 @@ def git_commit_push(plugin_name: str, branch: str = "dev"):
         )
         subprocess.run(["git", "push", "origin", branch], check=True)
         return True
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        print(f"[GIT ERROR] {e}")
         return False
 
 def extend_plugin(plugin_name: str, new_feature: str, test_code: str = "", max_retries: int = 3):
@@ -37,8 +39,11 @@ def extend_plugin(plugin_name: str, new_feature: str, test_code: str = "", max_r
     backup_path = main_file + ".bak"
     shutil.copy(main_file, backup_path)
 
-    with open(main_file, "r", encoding="utf-8") as f:
-        old_code = f.read()
+    try:
+        with open(main_file, "r", encoding="utf-8") as f:
+            old_code = f.read()
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to read {main_file}: {e}"}
 
     # Ask GPT-5 to extend
     prompt = f"""
@@ -56,23 +61,38 @@ and tests must import them using: from executor.plugins.<plugin_name> import <pl
 
 Return ONLY the full corrected plugin code.
     """
-    response = openai_client.ask_executor(prompt)
-    new_code = response.get("response_text", "")
+    try:
+        response = openai_client.ask_executor(prompt)
+        new_code = response.get("response_text", "")
+    except Exception as e:
+        tb = traceback.format_exc()
+        return {"status": "error", "message": f"ask_executor failed: {e}", "traceback": tb}
 
     if not new_code.strip():
-        return {"status": "error", "message": "No new code generated, rolled back."}
+        return {
+            "status": "error",
+            "message": "No new code generated. Model may not have understood the request.",
+            "debug": response
+        }
 
-    with open(main_file, "w", encoding="utf-8") as f:
-        f.write(new_code)
+    try:
+        with open(main_file, "w", encoding="utf-8") as f:
+            f.write(new_code)
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to write new code to {main_file}: {e}"}
 
     # --- Test + Patch Loop ---
-    passed, output = iterative_patch(
-        safe_name,
-        main_file,
-        test_file,
-        openai_client.ask_executor,   # ✅ inject ask_executor
-        max_retries=max_retries
-    )
+    try:
+        passed, output = iterative_patch(
+            safe_name,
+            main_file,
+            test_file,
+            openai_client.ask_executor,   # ✅ inject ask_executor
+            max_retries=max_retries
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        return {"status": "error", "message": f"iterative_patch crashed: {e}", "traceback": tb}
 
     if passed:
         success = git_commit_push(safe_name, branch="dev")
@@ -86,7 +106,8 @@ Return ONLY the full corrected plugin code.
         return {
             "status": "error",
             "message": f"Extension failed after {max_retries} retries. Rolled back.",
-            "test_output": output
+            "test_output": output,
+            "last_code": new_code[:500]  # show snippet of what was attempted
         }
 
 if __name__ == "__main__":
