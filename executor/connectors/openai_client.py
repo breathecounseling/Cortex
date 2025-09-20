@@ -5,9 +5,41 @@ error handling, budget usage logging, and self-repair for import-time failures.
 
 import os
 import math
+import json
 from typing import Any, Dict, List
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
+
+from executor.plugins.builder import builder, extend_plugin
+
+TOOLS = [
+    {
+        "type": "function",
+        "name": "build_plugin",
+        "description": "Create a new Executor plugin.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plugin_name": {"type": "string"},
+                "purpose": {"type": "string"}
+            },
+            "required": ["plugin_name", "purpose"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "extend_plugin",
+        "description": "Extend an existing Executor plugin with a new feature.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plugin_name": {"type": "string"},
+                "new_feature": {"type": "string"}
+            },
+            "required": ["plugin_name", "new_feature"]
+        }
+    }
+]
 
 # --- Bootstrap self-repair for imports ---
 try:
@@ -53,6 +85,7 @@ def _call_model(messages: List[Dict[str, str]], model: str) -> Any:
     return client.responses.create(
         model=model,
         input=messages,
+        tools=TOOLS,
         store=False,
     )
 
@@ -81,6 +114,28 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
 
         resp = _call_model(messages, model=model)
 
+        # --- Tool call handling ---
+        for item in getattr(resp, "output", []):
+            if getattr(item, "type", "") == "function_call":
+                name = getattr(item, "name", "")
+                args = {}
+                try:
+                    args = json.loads(item.arguments)
+                except Exception:
+                    pass
+
+                if name == "build_plugin":
+                    return builder.build_plugin(
+                        plugin_name=args.get("plugin_name", ""),
+                        purpose=args.get("purpose", "")
+                    )
+                elif name == "extend_plugin":
+                    return extend_plugin.extend_plugin(
+                        plugin_name=args.get("plugin_name", ""),
+                        new_feature=args.get("new_feature", "")
+                    )
+
+        # --- Fallback to text output ---
         out_text = getattr(resp, "output_text", None) or ""
         if not out_text:
             try:
@@ -142,11 +197,3 @@ def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = Fals
             if repair.get("status") == "ok":
                 return ask_executor(prompt, plugin_name=plugin_name, heavy=heavy, _retry_on_repair=False)
         return {"status": "error", **err_ctx}
-
-
-if __name__ == "__main__":
-    print("Test run:")
-    r1 = ask_executor("Remember this: my favorite color is green")
-    print("Assistant:", r1.get("assistant_output"))
-    r2 = ask_executor("What is my favorite color?")
-    print("Assistant:", r2.get("assistant_output"))
