@@ -7,7 +7,6 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 # Core capabilities we’ll call when the model decides to “act”
-from executor.plugins.builder.extend_plugin import extend_plugin
 from executor.connectors.openai_client import OpenAIClient
 from executor.utils.error_handler import ExecutorError, classify_error
 
