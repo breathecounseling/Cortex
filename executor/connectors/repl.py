@@ -2,7 +2,7 @@
 from __future__ import annotations
 import sys
 
-from executor.plugins.extend_plugin import extend_plugin
+from executor.plugins.builder.extend_plugin import extend_plugin
 from executor.plugins.error_handler import ExecutorError
 
 BANNER = "Executor REPL — type: extend <plugin> : <goal> | quit"
