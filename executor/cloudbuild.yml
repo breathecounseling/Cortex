@@ -1,13 +1,13 @@
 steps:
-  # Step 1: Build Docker image from repo
+  # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/cortex-executor:latest', '.']
 
-  # Step 2: Push image to Google Container Registry (GCR)
+  # Step 2: Push to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/$PROJECT_ID/cortex-executor:latest']
 
-  # Step 3: Deploy image to Cloud Run
+  # Step 3: Deploy to Cloud Run with env vars
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
       [
@@ -16,8 +16,12 @@ steps:
         '--region', 'us-central1',
         '--platform', 'managed',
         '--allow-unauthenticated',
-        '--port', '8000'
+        '--port', '8000',
+        '--set-env-vars', 'OPENAI_API_KEY=$_OPENAI_API_KEY'
       ]
 
 images:
   - 'gcr.io/$PROJECT_ID/cortex-executor:latest'
+
+substitutions:
+  _OPENAI_API_KEY=""
