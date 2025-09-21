@@ -1,51 +1,61 @@
-"""
-Error Handler and Self-Repair Loop for Cortex Executor
-- Classifies errors
-- Suggests repair actions
-- Calls patcher to attempt fixes
-"""
+# executor/plugins/error_handler.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Dict
 
-import os
-import re
-import traceback
-from pathlib import Path
-from executor.utils import self_repair
+@dataclass
+class Classification:
+    name: str
+    details: Dict[str, Any]
+    repair_proposal: str
 
-def classify_error(message: str) -> str:
-    """Categorize error messages into known types."""
-    if not message:
-        return "unknown"
+class ExecutorError(Exception):
+    def __init__(self, kind: str, details: Dict[str, Any] | None = None):
+        super().__init__(kind)
+        self.kind = kind
+        self.details = details or {}
 
-    msg = message.lower()
-    if "no module named" in msg or "importerror" in msg or "modulenotfound" in msg:
-        return "import_error"
-    if "syntaxerror" in msg:
-        return "syntax_error"
-    if "failed" in msg or "assert" in msg:
-        return "test_failure"
-    if "traceback" in msg or "runtimeerror" in msg:
-        return "runtime_error"
-    return "unknown"
-
-def attempt_repair(error: dict, retries: int = 2) -> dict:
-    """
-    Attempt targeted repair based on error classification.
-    Retries up to `retries` times.
-    """
-    msg = error.get("message", "")
-    classification = classify_error(msg)
-    details = {"classification": classification, "attempts": []}
-
-    for i in range(retries):
-        print(f"[ERROR HANDLER] Attempt {i+1}/{retries} for {classification}...")
-        repair = self_repair.attempt_self_repair(error)
-        details["attempts"].append(repair)
-        if repair.get("status") == "ok":
-            return {"status": "ok", "message": "Repair succeeded", "details": details}
-
-    return {"status": "error", "message": "All repair attempts failed", "details": details}
-
-def explain_error(error: dict) -> str:
-    """Generate a human-readable explanation of the error and classification."""
-    classification = classify_error(error.get("message", ""))
-    return f"Error classified as: {classification}\nDetails: {error.get('message')}"
+def classify_error(err: Exception) -> Classification:
+    if isinstance(err, ExecutorError):
+        if err.kind == "empty_model_output":
+            return Classification(
+                name="empty_model_output",
+                details=err.details,
+                repair_proposal=(
+                    "Use response_format=json_object, enforce a JSON contract with 'files', "
+                    "and retry with 'Respond ONLY with JSON' guard."
+                ),
+            )
+        if err.kind == "malformed_response":
+            return Classification(
+                name="malformed_response",
+                details=err.details,
+                repair_proposal=(
+                    "Parse fenced ```json blocks; fall back to first balanced { ... }. "
+                    "If schema missing 'files', request regeneration with explicit keys."
+                ),
+            )
+        if err.kind == "plugin_not_found":
+            return Classification(
+                name="plugin_not_found",
+                details=err.details,
+                repair_proposal=(
+                    "Resolve plugin via a canonical resolver that accepts names, dirs, or file paths. "
+                    "List known plugins if ambiguity persists."
+                ),
+            )
+        if err.kind == "tests_failed":
+            return Classification(
+                name="tests_failed",
+                details=err.details,
+                repair_proposal=(
+                    "Provide the failing traceback back to the model and request a minimal fix patch. "
+                    "Re-run focused tests; if still failing, isolate by file and bisect."
+                ),
+            )
+    # default/fallback
+    return Classification(
+        name=type(err).__name__,
+        details={},
+        repair_proposal="Surface full stack to user; collect context for targeted repair.",
+    )
