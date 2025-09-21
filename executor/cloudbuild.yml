@@ -1,8 +1,11 @@
 steps:
+  # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/executor/executor-middleware:latest', '.']
+    args: [ 'build', '-t', 'gcr.io/$PROJECT_ID/cortex-executor:latest', '.' ]
+
+  # Step 2: Push to Google Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/executor/executor-middleware:latest']
+    args: [ 'push', 'gcr.io/$PROJECT_ID/cortex-executor:latest' ]
 
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/executor/executor-middleware:latest'
+  - 'gcr.io/$PROJECT_ID/cortex-executor:latest'
