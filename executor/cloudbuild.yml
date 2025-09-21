@@ -1,4 +1,13 @@
 steps:
+  # Step 0: Run tests (including test_manifests.py)
+  - name: 'python:3.11-slim'
+    entrypoint: 'bash'
+    args:
+      - -c
+      - |
+        pip install --no-cache-dir -r executor/requirements.txt
+        pytest -q --maxfail=1 --disable-warnings
+
   # Step 1: Build Docker image
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/$PROJECT_ID/cortex-executor:latest', '.']
