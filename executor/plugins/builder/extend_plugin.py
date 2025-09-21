@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 
 from executor.utils.plugin_resolver import resolve as resolve_plugin, PluginNotFound
 from executor.connectors.openai_client import OpenAIClient
-from executor.plugins.error_handler import classify_error, ExecutorError
+from executor.utils.error_handler import classify_error, ExecutorError
 from executor.plugins.patcher_utils import run_tests, WorkingDir
 from executor.plugins.self_repair import apply_file_edits
 
