@@ -5,7 +5,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from executor.connectors.openai_client import OpenAIClient
 from executor.plugins.builder.extend_plugin import extend_plugin
@@ -174,9 +174,12 @@ def main():
             {"role": "system", "content": f"Docket: {json.dumps(docket.list_tasks())}"},
             {"role": "system", "content": (
                 "Behaviors:\n"
-                "- If input implies goals/future-cast (improve, tighten, help with, let's talk, my goal is, how can I), run assessment mode: ask diagnostic questions, gather facts, do gap analysis.\n"
-                "- Else handle as chat, brainstorm, or actions.\n"
-                "- Always return JSON {assistant_message, mode, facts_to_save, tasks_to_add, directive_updates, ideas, actions}."
+                "- If input implies goals/future-cast (improve, tighten, help with, let's talk, my goal is, how can I), "
+                "enter ASSESSMENT MODE. In assessment mode: ask smart, domain-specific diagnostic questions, "
+                "infer missing info, do gap analysis vs current facts, and propose objectives/tasks.\n"
+                "- Questions should be dynamically generated, not from a static file.\n"
+                "- Else: handle as chat, brainstorm, or actions.\n"
+                "- Always return JSON {assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions}."
             )},
             {"role": "user", "content": user_text},
         ]
