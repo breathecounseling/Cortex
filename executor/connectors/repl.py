@@ -2,16 +2,12 @@
 from __future__ import annotations
 import json
 import os
-import re
 import sys
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 from executor.connectors.openai_client import OpenAIClient
-from executor.plugins.builder.extend_plugin import extend_plugin
-from executor.utils.error_handler import ExecutorError, classify_error
 from executor.utils.docket import Docket
-from executor.plugins.repo_analyzer import repo_analyzer
 
 # ----------------------------- Memory bridges -----------------------------
 def _try_import_cm():
@@ -81,26 +77,36 @@ def _save_fact_fallback(session: str, key: str, value: Any) -> None:
 
 def save_turn(session: str, role: str, content: Any) -> None:
     if _CM_SAVE_TURN:
-        try: _CM_SAVE_TURN(session, role=role, content=content); return
-        except Exception: pass
+        try:
+            _CM_SAVE_TURN(session, role=role, content=content)
+            return
+        except Exception:
+            pass
     _save_turn_fallback(session, role, content)
 
 def get_turns(session: str) -> List[Dict[str, str]]:
     if _CM_GET_TURNS:
-        try: return _CM_GET_TURNS(session)
-        except Exception: pass
+        try:
+            return _CM_GET_TURNS(session)
+        except Exception:
+            pass
     return _load_turns_fallback(session)
 
 def load_facts(session: str) -> Dict[str, Any]:
     if _CM_LOAD_FACTS:
-        try: return _CM_LOAD_FACTS(session)
-        except Exception: pass
+        try:
+            return _CM_LOAD_FACTS(session)
+        except Exception:
+            pass
     return _load_facts_fallback(session)
 
 def save_fact(session: str, key: str, value: Any) -> None:
     if _CM_SAVE_FACT:
-        try: _CM_SAVE_FACT(session, key=key, value=value); return
-        except Exception: pass
+        try:
+            _CM_SAVE_FACT(session, key=key, value=value)
+            return
+        except Exception:
+            pass
     _save_fact_fallback(session, key, value)
 
 # ----------------------------- Directives -----------------------------
@@ -124,19 +130,6 @@ def load_directives() -> Dict[str, Any]:
         except Exception:
             pass
     return merged
-
-def save_directives(updates: Dict[str, Any]) -> None:
-    path = _globals_path()
-    current: Dict[str, Any] = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                current = json.load(f)
-        except Exception:
-            current = {}
-    current.update(updates or {})
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(current, f, indent=2)
 
 # ----------------------------- Helpers -----------------------------
 def _assessment_trigger(text: str) -> bool:
@@ -167,6 +160,29 @@ def main():
             print("bye")
             return
 
+        # Approve/reject idea tasks
+        if user_text.lower().startswith("approve "):
+            tid = user_text.split(" ", 1)[1].strip()
+            tasks = docket.list_tasks()
+            for t in tasks:
+                if t["id"] == tid and t["title"].startswith("[idea]"):
+                    t["title"] = t["title"].replace("[idea] ", "", 1)
+                    t["status"] = "todo"
+                    docket._save()
+                    print(f"✅ Promoted idea {tid} to TODO: {t['title']}")
+                    break
+            continue
+
+        if user_text.lower().startswith("reject "):
+            tid = user_text.split(" ", 1)[1].strip()
+            tasks = docket.list_tasks()
+            new_tasks = [t for t in tasks if t["id"] != tid]
+            if len(new_tasks) != len(tasks):
+                docket._data["tasks"] = new_tasks
+                docket._save()
+                print(f"❌ Rejected idea {tid}, removed from docket.")
+            continue
+
         msgs = [
             {"role": "system", "content": "You are the Cortex Executor Orchestrator."},
             {"role": "system", "content": f"Directives: {json.dumps(directives)}"},
@@ -175,9 +191,8 @@ def main():
             {"role": "system", "content": (
                 "Behaviors:\n"
                 "- If input implies goals/future-cast (improve, tighten, help with, let's talk, my goal is, how can I), "
-                "enter ASSESSMENT MODE. In assessment mode: ask smart, domain-specific diagnostic questions, "
-                "infer missing info, do gap analysis vs current facts, and propose objectives/tasks.\n"
-                "- Questions should be dynamically generated, not from a static file.\n"
+                "enter ASSESSMENT MODE: ask dynamic diagnostic questions, infer missing info, do gap analysis vs facts, "
+                "and propose objectives/tasks.\n"
                 "- Else: handle as chat, brainstorm, or actions.\n"
                 "- Always return JSON {assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions}."
             )},
