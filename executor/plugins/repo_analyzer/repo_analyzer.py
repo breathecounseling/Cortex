@@ -1,39 +1,48 @@
+# executor/plugins/repo_analyzer/repo_analyzer.py
+from __future__ import annotations
+import os, re, json
+from typing import Dict, Any
 
-"""
-Repo Analyzer plugin
-Scans Python files under the executor/ directory and builds a map of
-- functions
-- classes
-- imports
-"""
+def scan_repo(base: str = "executor/plugins") -> Dict[str, Dict[str, Any]]:
+    """
+    Scan the repo for plugins. Prefer plugin.json manifests;
+    fallback to scraping function/class names.
+    Returns: { plugin_name: { "description": str, "capabilities": set(), "symbols": set() } }
+    """
+    idx: Dict[str, Dict[str, Any]] = {}
+    if not os.path.isdir(base):
+        return idx
 
-import os
-import ast
-from pathlib import Path
-
-
-def analyze_repo(root: str = "executor") -> dict:
-    results = {}
-    for py in Path(root).rglob("*.py"):
-        try:
-            with open(py, "r", encoding="utf-8") as f:
-                tree = ast.parse(f.read(), filename=str(py))
-            funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
-            classes = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
-            imports = [
-                n.module
-                for n in ast.walk(tree)
-                if isinstance(n, ast.ImportFrom) and n.module
-            ]
-            results[str(py)] = {
-                "functions": funcs,
-                "classes": classes,
-                "imports": imports,
-            }
-        except Exception:
+    for entry in os.listdir(base):
+        plugin_dir = os.path.join(base, entry)
+        if not os.path.isdir(plugin_dir):
             continue
-    return results
 
+        meta: Dict[str, Any] = {"description": "", "capabilities": set(), "symbols": set()}
+        manifest_path = os.path.join(plugin_dir, "plugin.json")
 
-def run():
-    return {"status": "ok", "analysis": analyze_repo()}
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                meta["description"] = manifest.get("description", "")
+                meta["capabilities"] = set(manifest.get("capabilities", []))
+            except Exception:
+                pass
+
+        # fallback: scrape symbols
+        if not meta["capabilities"]:
+            for root, _, files in os.walk(plugin_dir):
+                for fn in files:
+                    if fn.endswith(".py"):
+                        try:
+                            with open(os.path.join(root, fn), "r", encoding="utf-8") as f:
+                                src = f.read()
+                            meta["symbols"].update(re.findall(r"def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", src))
+                            meta["symbols"].update(re.findall(r"class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[\(:]", src))
+                        except Exception:
+                            continue
+
+        idx[entry] = meta
+
+    return idx
