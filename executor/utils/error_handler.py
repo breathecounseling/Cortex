@@ -45,6 +45,19 @@ def classify_error(err: Exception) -> Classification:
                 ),
             )
         if err.kind == "tests_failed":
+            report = err.details.get("report", "")
+            # 👇 New branch: detect import errors in pytest logs
+            if "ModuleNotFoundError: No module named 'executor'" in report:
+                return Classification(
+                    name="import_error",
+                    details=err.details,
+                    repair_proposal=(
+                        "Tests cannot import the 'executor' package. "
+                        "Fix by setting PYTHONPATH in patcher_utils.run_tests or "
+                        "inserting sys.path in test files. "
+                        "Recommend updating patcher_utils to inject PYTHONPATH automatically."
+                    ),
+                )
             return Classification(
                 name="tests_failed",
                 details=err.details,
