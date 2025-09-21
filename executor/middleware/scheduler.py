@@ -1,14 +1,30 @@
-"""
-Scheduler module
-Would manage task queueing, retries, and scheduling.
-For now, just runs router once.
-"""
+# executor/middleware/scheduler.py
+import os, json, time
+from executor.connectors import repl
+from executor.utils.docket import Docket
 
-from executor.middleware import router
+SESSION = "repl"
+_MEM_DIR = ".executor/memory"
 
-def run_once(task: str):
-    plugin = router.handle_task(task)
-    print(f"[Scheduler] Task '{task}' routed to: {plugin}")
+def _load_directives():
+    p = os.path.join(_MEM_DIR, "global_directives.json")
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-if __name__ == "__main__":
-    run_once("Generate a bizops report")
+def run_forever():
+    print("Executor background scheduler running...")
+    while True:
+        directives = _load_directives()
+        docket = Docket(namespace=SESSION)
+        tasks = [t for t in docket.list_tasks() if t["status"] == "todo"]
+        if tasks:
+            print("Background: pending tasks:", tasks[0]["title"])
+        else:
+            if directives.get("autonomous_mode") and directives.get("scope"):
+                print(f"Background: no tasks, considering brainstorm in scope={directives['scope']}")
+        time.sleep(int(directives.get("standby_minutes", 15)) * 60)
