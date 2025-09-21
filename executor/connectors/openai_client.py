@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from executor.plugins.error_handler import ExecutorError
+from executor.utils.error_handler import ExecutorError
 
 # Load .env from project root
 load_dotenv()
