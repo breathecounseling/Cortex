@@ -1,163 +1,87 @@
-"""
-OpenAI Responses API connector for Executor with:
-- Persistent memory
-- Fact handling
-- Tool calls
-- Budget logging
-- Error classification + self-repair integration
-"""
-
+# executor/connectors/openai_client.py
+from __future__ import annotations
 import os
-import math
 import json
-import re
-from typing import Any, Dict, List
+from typing import Optional, Dict, Any, List
+
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
+from openai import OpenAI
 
-from executor.plugins.builder import builder, extend_plugin
-from executor.plugins.conversation_manager import conversation_manager as cm
-from executor.plugins.conversation_manager.conversation_manager import save_fact
-from executor.plugins.budget_monitor import budget_monitor
-from executor.utils import error_handler
+from executor.plugins.error_handler import ExecutorError
 
-TOOLS = [
-    {
-        "type": "function",
-        "name": "build_plugin",
-        "description": "Create a new Executor plugin.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {"type": "string"},
-                "purpose": {"type": "string"}
-            },
-            "required": ["plugin_name", "purpose"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "extend_plugin",
-        "description": "Extend an existing Executor plugin with a new feature.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {"type": "string"},
-                "new_feature": {"type": "string"}
-            },
-            "required": ["plugin_name", "new_feature"]
-        }
-    }
-]
+# Load .env from project root
+load_dotenv()
 
-# Load .env
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "../../.env"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY missing from .env")
+class OpenAIClient:
+    def __init__(self, model: str = "gpt-4o-mini"):
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY not found in environment")
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
 
-REPL_MODEL = os.environ.get("CORTEX_REPL_MODEL", "gpt-4o-mini")
-HEAVY_MODEL = os.environ.get("CORTEX_HEAVY_MODEL", "gpt-5")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-def _estimate_tokens_from_messages(messages: List[Dict[str, str]]) -> int:
-    chars = sum(len(m.get("content") or "") for m in messages)
-    return max(1, math.ceil(chars / 4))
-
-def _call_model(messages: List[Dict[str, str]], model: str) -> Any:
-    return client.responses.create(
-        model=model,
-        input=messages,
-        tools=TOOLS,
-        store=False,
-    )
-
-def _maybe_extract_fact(user_input: str) -> tuple[str, str] | None:
-    """Heuristic: if user says 'my favorite X is Y', capture as (X, Y)."""
-    m = re.search(r"my favorite ([a-zA-Z ]+) is ([a-zA-Z ]+)", user_input.lower())
-    if m:
-        key = m.group(1).strip().replace(" ", "_")
-        value = m.group(2).strip()
-        return key, value
-    return None
-
-def ask_executor(prompt: str, plugin_name: str = "cortex", *, heavy: bool = False) -> Dict[str, Any]:
-    """Main entrypoint: handles chat, facts, tool calls, and errors with repair."""
-    try:
-        # Step 1: detect simple facts
-        fact = _maybe_extract_fact(prompt)
-        if fact:
-            entry = save_fact(plugin_name, fact[0], fact[1])
-            return {
-                "status": "ok",
-                "assistant_output": f"Got it! I'll remember your {fact[0].replace('_',' ')} is {fact[1]}.",
-                "messages": [],
-                "raw": entry
-            }
-
-        # Step 2: normal REPL flow
-        model = HEAVY_MODEL if heavy else REPL_MODEL
-        turn = cm.handle_repl_turn(
-            current_input=prompt,
-            history=cm.get_history(plugin_name),
-            session=plugin_name,
-            limit=10,
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        response_format: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Low-level chat call to OpenAI API.
+        Returns assistant content as a string.
+        """
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            response_format=response_format or {"type": "text"},
         )
-        messages = turn["messages"]
-        resp = _call_model(messages, model=model)
+        return response.choices[0].message.content or ""
 
-        # Step 3: tool calls
-        for item in getattr(resp, "output", []):
-            if getattr(item, "type", "") == "function_call":
-                name = getattr(item, "name", "")
+    def generate_structured(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: Optional[Dict[str, Any]] = None,
+        attachments: Optional[List[str]] = None,
+        max_retries: int = 2,
+    ) -> str:
+        """
+        Enforce JSON-only replies with at least one file entry. Retries if empty/malformed.
+        """
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+
+        if attachments:
+            for path in attachments:
                 try:
-                    args = json.loads(item.arguments)
+                    with open(path, "r", encoding="utf-8") as f:
+                        code = f.read()
+                    messages.append({
+                        "role": "user",
+                        "content": f"<FILE path='{path}'>\n{code}\n</FILE>",
+                    })
                 except Exception:
-                    args = {}
-                print(f"[TOOL DEBUG] Function call: {name} with args {args}")
-                if name == "build_plugin":
-                    return builder.build_plugin(
-                        plugin_name=args.get("plugin_name", ""),
-                        purpose=args.get("purpose", "")
-                    )
-                elif name == "extend_plugin":
-                    return extend_plugin.extend_plugin(
-                        plugin_name=args.get("plugin_name", ""),
-                        new_feature=args.get("new_feature", "")
-                    )
+                    continue
 
-        # Step 4: plain chat fallback
-        out_text = getattr(resp, "output_text", None) or ""
-        if not out_text:
-            for item in resp.output:
-                if getattr(item, "type", "") == "message":
-                    for c in item.content:
-                        if getattr(c, "type", "") == "output_text":
-                            out_text = c.text or ""
-                            break
+        messages.append({"role": "user", "content": user})
+        messages.append({
+            "role": "system",
+            "content": (
+                "Return ONLY JSON. Keys: rationale, changelog, files[]. "
+                "Each files[] item: path (string), content (string), kind ('code'|'test'|'doc'). "
+                "Never return an empty string."
+            ),
+        })
 
-        cm.record_assistant(plugin_name, out_text)
-        used_tokens = _estimate_tokens_from_messages(messages + [{"role": "assistant", "content": out_text}])
-        try:
-            budget_monitor.record_usage(used_tokens)
-        except Exception:
-            pass
+        for attempt in range(max_retries + 1):
+            out = self.chat(messages, response_format={"type": "json_object"})
+            if out and out.strip().startswith("{"):
+                return out
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Previous output was empty/invalid. You MUST return valid JSON now, "
+                    "with at least one non-empty file under 'files'. No prose."
+                ),
+            })
 
-        return {
-            "status": "ok",
-            "assistant_output": out_text,
-            "messages": messages,
-            "raw": resp,
-        }
-
-    except OpenAIError as e:
-        err = {"status": "error", "error_type": "OpenAIError", "message": str(e)}
-        print(f"[ERROR] {err}")
-        return error_handler.attempt_repair(err, retries=2)
-
-    except Exception as e:
-        tb = traceback.format_exc()
-        err = {"status": "error", "error_type": type(e).__name__, "message": str(e), "traceback": tb}
-        print(f"[ERROR] {err}")
-        return error_handler.attempt_repair(err, retries=2)
+        raise ExecutorError("empty_model_output", details={"why": "exhausted retries"})
