@@ -32,6 +32,7 @@ class Docket:
             json.dump(self._data, f, indent=2)
 
     def list_tasks(self) -> List[Dict[str, Any]]:
+        self._load()  # reload from disk
         return list(self._data.get("tasks", []))
 
     def add(self, title: str, priority: str = "normal") -> str:
