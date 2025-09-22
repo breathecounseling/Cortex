@@ -1,0 +1,5 @@
+{
+  "name": "conversation_manager",
+  "description": "Conversation manager plugin — manages turns, facts, and context history.",
+  "capabilities": []
+}
