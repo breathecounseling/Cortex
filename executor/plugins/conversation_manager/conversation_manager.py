@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import contextmanager
 import time
+import uuid
+
+_MEM_DIR = os.path.join(".executor", "memory")
+os.makedirs(_MEM_DIR, exist_ok=True)
+
 
 BASE_PATH = Path(os.environ.get("CONV_MGR_MEMORY_PATH", ".executor/memory"))
 BASE_PATH.mkdir(parents=True, exist_ok=True)
