@@ -1,0 +1,5 @@
+{
+  "name": "userpreferences",
+  "description": "User preferences plugin — stores and retrieves user-specific settings.",
+  "capabilities": []
+}
