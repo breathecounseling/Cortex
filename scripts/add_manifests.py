@@ -15,7 +15,7 @@ def scan_plugins(dry_run: bool = False) -> int:
     """Return number of missing manifests (and create them unless dry_run=True)."""
     missing = 0
     if not os.path.isdir(PLUGINS_DIR):
-        print(f"❌ Plugins dir not found: {PLUGINS_DIR}")
+        print(f"[ERROR] Plugins dir not found: {PLUGINS_DIR}")
         return -1
 
     for entry in os.listdir(PLUGINS_DIR):
@@ -29,7 +29,7 @@ def scan_plugins(dry_run: bool = False) -> int:
 
         missing += 1
         if dry_run:
-            print(f"⚠️ Missing manifest: {manifest_path}")
+            print(f"[WARN] Missing manifest: {manifest_path}")
             continue
 
         manifest = {
@@ -41,12 +41,12 @@ def scan_plugins(dry_run: bool = False) -> int:
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
-        print(f"✅ Created manifest: {manifest_path}")
+        print(f"[FIXED] Created manifest: {manifest_path}")
 
     if missing == 0:
-        print("🎉 All plugins have manifests.")
+        print("[OK] All plugins have manifests.")
     else:
-        print(f"⚠️ {missing} plugin(s) missing manifests.")
+        print(f"[WARN] {missing} plugin(s) missing manifests.")
     return missing
 
 def main():
