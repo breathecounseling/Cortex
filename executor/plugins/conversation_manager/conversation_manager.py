@@ -13,6 +13,7 @@ from pathlib import Path
 from contextlib import contextmanager
 import time
 import uuid
+import string
 
 _MEM_DIR = os.path.join(".executor", "memory")
 os.makedirs(_MEM_DIR, exist_ok=True)
@@ -104,36 +105,32 @@ def load_facts(session: str) -> dict:
 
 # --- REPL turn integration ---
 
+def _clean_fact(value: str) -> str:
+    return value.strip().strip(string.punctuation)
+
 def handle_repl_turn(
     current_input: str,
     history: list[dict] | None = None,
     session: str = "cortex",
     limit: int = 10,
 ) -> dict:
-    # Load existing history if not provided
     hist = history if history is not None else load_turns(session)
-
-    # Clip to the last N messages
     trimmed = hist[-limit:] if limit else hist
-
-    # Build new user message
     user_msg = {"role": "user", "content": current_input}
 
-    # Save turn to memory
     save_turn(session, "user", current_input)
 
-    # Simple fact extraction demo
     low = current_input.lower()
     if "favorite color is" in low:
-        color = current_input.split("favorite color is")[-1].strip()
-        save_fact(session, "favorite_color", color)
+        color = current_input.split("favorite color is")[-1]
+        save_fact(session, "favorite_color", _clean_fact(color))
     if "favorite food is" in low:
-        food = current_input.split("favorite food is")[-1].strip()
-        save_fact(session, "favorite_food", food)
+        food = current_input.split("favorite food is")[-1]
+        save_fact(session, "favorite_food", _clean_fact(food))
 
-    # Return messages including history + new turn
     messages = trimmed + [user_msg]
     return {"messages": messages}
+
 
 def record_assistant(session: str, content: str) -> None:
     save_turn(session, "assistant", content)
