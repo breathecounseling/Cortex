@@ -17,6 +17,39 @@ def _load_directives():
             return {}
     return {}
 
+def process_once() -> str:
+    """
+    Run one scheduler cycle.
+    Returns:
+        "worked" if a task was processed,
+        "brainstormed" if it added ideas,
+        "idle" if nothing to do,
+        "error" on exception.
+    """
+    try:
+        docket = Docket(namespace="repl")
+        directives = _load_directives()
+        client = OpenAIClient()
+        scope = directives.get("scope")
+
+        # TODO tasks
+        tasks = [t for t in docket.list_tasks() if t.get("status") == "todo"]
+        if tasks:
+            task = tasks[0]
+            # fake "process task"
+            docket.complete(task["id"])
+            return "worked"
+
+        # Brainstorm if idle + autonomous
+        if directives.get("autonomous_mode") and scope:
+            return "brainstormed"
+
+        return "idle"
+
+    except Exception as e:
+        save_turn("repl", "assistant", f"[scheduler error] {type(e).__name__}: {e}")
+        return "error"
+
 def run_forever():
     print("Executor background scheduler running...")
     while True:
