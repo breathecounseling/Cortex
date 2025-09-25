@@ -1,5 +1,6 @@
 # executor/middleware/scheduler.py
 import os, json, time
+from executor.connectors.openai_client import OpenAIClient
 from executor.connectors import repl
 from executor.utils.docket import Docket
 
