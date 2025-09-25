@@ -203,12 +203,15 @@ def main():
         data = _parse_json(raw_out)
 
         print(data.get("assistant_message", ""))
-        for f in data.get("facts_to_save") or []:
-            if f.get("key"):
-                save_fact(SESSION, f["key"], f.get("value"))
-        for t in data.get("tasks_to_add") or []:
-            if t.get("title"):
-                docket.add(title=t["title"], priority=t.get("priority", "normal"))
+            for f in data.get("facts_to_save") or []:
+                if isinstance(f, dict):
+                    k, v = f.get("key"), f.get("value")
+                    if k:
+                        save_fact(SESSION, k, v)
+                elif isinstance(f, str):
+                    # fallback: treat as bare value, try to map to last pending question if available
+                    save_fact(SESSION, "unspecified_fact", f.strip())
+
 
 if __name__ == "__main__":
     main()
