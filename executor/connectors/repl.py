@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from executor.connectors.openai_client import OpenAIClient
 from executor.plugins.builder.extend_plugin import extend_plugin
 from executor.utils.docket import Docket
+from executor.plugins.conversation_manager import conversation_manager as cm
 
 # ----------------------------- Paths & helpers -----------------------------
 _MEM_DIR = os.path.join(".executor", "memory")
@@ -35,35 +36,6 @@ def _read_json(path: str, default):
 def _write_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-
-# ----------------------------- Facts & turns -----------------------------
-def load_facts(session: str) -> Dict[str, Any]:
-    return _read_json(_path(session, "facts"), {})
-
-def save_fact(session: str, key: str, value: Any) -> None:
-    facts = load_facts(session)
-    facts[key] = value
-    _write_json(_path(session, "facts"), facts)
-
-def load_turns(session: str) -> List[Dict[str, str]]:
-    p = os.path.join(_MEM_DIR, f"{session}.jsonl")
-    if not os.path.exists(p):
-        return []
-    out = []
-    with open(p, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-                if rec.get("role") in {"user", "assistant", "system"}:
-                    out.append({"role": rec["role"], "content": rec["content"]})
-            except Exception:
-                continue
-    return out[-50:]
-
-def save_turn(session: str, role: str, content: Any) -> None:
-    rec = {"ts": _ts(), "role": role, "content": content}
-    with open(os.path.join(_MEM_DIR, f"{session}.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
 
 # ----------------------------- Pending questions -----------------------------
 def load_pending_q(session: str) -> List[Dict[str, Any]]:
@@ -165,12 +137,10 @@ _ADD_PAT = re.compile(r"\b(add|build|create|implement|extend)\b", re.I)
 def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     if not _ADD_PAT.search(text):
         return None
-    # crude heuristic for plugin
     plugin = "repl"
     m = re.search(r"\bextend\s+([a-zA-Z_][\w\-]*)", text, re.I)
     if m:
         plugin = m.group(1).lower().replace("-", "_")
-    # goal is the whole request (clean)
     goal = text.strip()
     return {"plugin": plugin, "goal": goal, "status": "pending"}
 
@@ -183,7 +153,6 @@ def _execute_ready_actions(docket: Docket) -> None:
     for a in ready:
         raw_name, goal, aid = a["plugin"], a["goal"], a["id"]
 
-        # normalize plugin name
         plugin = raw_name.strip().lower().replace(" ", "_").replace("-", "_")
 
         try:
@@ -191,12 +160,10 @@ def _execute_ready_actions(docket: Docket) -> None:
                 res = extend_plugin(plugin, goal)
             except Exception as e:
                 if "plugin_not_found" in str(e):
-                    # check repo analyzer
                     plugins = repo_analyzer.scan_repo()
                     if plugin not in plugins:
                         print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
                         builder.main(plugin_name=plugin, description=f"Auto-generated for goal: {goal}")
-                    # retry after scaffolding
                     res = extend_plugin(plugin, goal)
                 else:
                     raise
@@ -227,7 +194,6 @@ def main():
             print("bye")
             return
 
-        # simple “build now” intents
         if user_text.lower() in {"go ahead and build it", "proceed", "do it", "build now", "execute"}:
             a = mark_last_action_ready(SESSION)
             if a:
@@ -237,14 +203,12 @@ def main():
                 print("[Butler] I don’t have a pending action to build yet.")
             continue
 
-        # pending question reminder on first input
         if not reminded:
             pqs = [q for q in load_pending_q(SESSION) if q["status"] == "pending"]
             if pqs:
                 print(f"[Butler] You still have {len(pqs)} pending question(s). You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
             reminded = True
 
-        # pending question commands
         low = user_text.lower()
         if low.startswith("answer_questions"):
             qs = load_pending_q(SESSION)
@@ -253,7 +217,7 @@ def main():
                     print(f"Q: {q['question']}")
                     ans = sys.stdin.readline().strip()
                     if ans:
-                        save_fact(SESSION, (directives.get("scope") or "unspecified_fact"), ans.strip(".! "))
+                        cm.save_fact(SESSION, (directives.get("scope") or "unspecified_fact"), ans.strip(".! "))
                         q["status"] = "answered"
             save_pending_q(SESSION, qs)
             continue
@@ -265,35 +229,37 @@ def main():
             print("[Butler] All pending questions cleared.")
             continue
 
-        # Build model messages
+        # Unified conversation manager
+        cm_result = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
+        history_msgs = cm_result.get("messages", [])
+        facts = cm.load_facts(SESSION)
+
         msgs = [
             {"role": "system", "content": STRUCTURE_INSTRUCTION},
             {"role": "system", "content": f"Directives: {json.dumps(directives)}"},
-            {"role": "system", "content": f"Facts: {json.dumps(load_facts(SESSION))}"},
+            {"role": "system", "content": f"Facts: {json.dumps(facts)}"},
             {"role": "system", "content": f"Docket: {json.dumps(docket.list_tasks())}"},
-            {"role": "user", "content": user_text},
+            *history_msgs,
         ]
+
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
         data = _parse_json(raw_out)
 
-        # Speak
         print(data.get("assistant_message", ""))
+        cm.record_assistant(SESSION, data.get("assistant_message", ""))
 
-        # Save facts (defensive)
         for f in data.get("facts_to_save") or []:
             if isinstance(f, dict):
                 k, v = f.get("key"), f.get("value")
                 if k:
-                    save_fact(SESSION, k, str(v).strip(".! "))
+                    cm.save_fact(SESSION, k, str(v).strip(".! "))
             elif isinstance(f, str):
-                save_fact(SESSION, "unspecified_fact", f.strip(".! "))
+                cm.save_fact(SESSION, "unspecified_fact", f.strip(".! "))
 
-        # Save tasks (general)
         for t in data.get("tasks_to_add") or []:
             if isinstance(t, dict) and t.get("title"):
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
-        # Queue actions from model
         actions = data.get("actions") or []
         for a in actions:
             plugin = (a.get("plugin") or "").strip()
@@ -303,7 +269,6 @@ def main():
                 aid = queue_action(SESSION, plugin, goal, status=status)
                 print(f"[Butler] Queued action {aid}: extend {plugin}: {goal} (status={status})")
 
-        # Host-side fallback inference if model didn’t output actions
         if not actions:
             inferred = _infer_action_from_text(user_text)
             if inferred:
@@ -312,7 +277,6 @@ def main():
                 print("[Butler] I’ll ask for any missing details, then you can say 'go ahead and build it' to execute.")
                 continue
 
-        # If model already marked ready, execute now
         if any((a.get("status") or "").lower() == "ready" for a in actions):
             _execute_ready_actions(docket)
 
