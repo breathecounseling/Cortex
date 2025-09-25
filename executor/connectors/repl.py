@@ -5,11 +5,19 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional
 
 from executor.connectors.openai_client import OpenAIClient
 from executor.plugins.builder.extend_plugin import extend_plugin
 from executor.utils.docket import Docket
+
+# 🔁 Unified memory import
+from executor.plugins.conversation_manager.conversation_manager import (
+    handle_repl_turn,
+    record_assistant,
+    load_facts as cm_load_facts,
+    save_fact as cm_save_fact,
+)
 
 # ----------------------------- Paths & helpers -----------------------------
 _MEM_DIR = os.path.join(".executor", "memory")
@@ -35,35 +43,6 @@ def _read_json(path: str, default):
 def _write_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-
-# ----------------------------- Facts & turns -----------------------------
-def load_facts(session: str) -> Dict[str, Any]:
-    return _read_json(_path(session, "facts"), {})
-
-def save_fact(session: str, key: str, value: Any) -> None:
-    facts = load_facts(session)
-    facts[key] = value
-    _write_json(_path(session, "facts"), facts)
-
-def load_turns(session: str) -> List[Dict[str, str]]:
-    p = os.path.join(_MEM_DIR, f"{session}.jsonl")
-    if not os.path.exists(p):
-        return []
-    out = []
-    with open(p, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-                if rec.get("role") in {"user", "assistant", "system"}:
-                    out.append({"role": rec["role"], "content": rec["content"]})
-            except Exception:
-                continue
-    return out[-50:]
-
-def save_turn(session: str, role: str, content: Any) -> None:
-    rec = {"ts": _ts(), "role": role, "content": content}
-    with open(os.path.join(_MEM_DIR, f"{session}.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
 
 # ----------------------------- Pending questions -----------------------------
 def load_pending_q(session: str) -> List[Dict[str, Any]]:
@@ -232,7 +211,8 @@ def main():
                     print(f"Q: {q['question']}")
                     ans = sys.stdin.readline().strip()
                     if ans:
-                        save_fact(SESSION, (directives.get("scope") or "unspecified_fact"), ans.strip(".! "))
+                        # 🔁 facts now saved via Conversation Manager
+                        cm_save_fact(SESSION, (directives.get("scope") or "unspecified_fact"), ans.strip(".! "))
                         q["status"] = "answered"
             save_pending_q(SESSION, qs)
             continue
@@ -244,28 +224,45 @@ def main():
             print("[Butler] All pending questions cleared.")
             continue
 
-        # Build model messages
+        # 🔁 Build conversational history via Conversation Manager
+        cm = handle_repl_turn(
+            current_input=user_text,
+            session=SESSION,
+            limit=50,  # keep generous context; CM can later add summarization
+        )
+        convo_messages = cm.get("messages", [])
+
+        # Gather dynamic context
+        facts = cm_load_facts(SESSION)  # unified facts
         msgs = [
             {"role": "system", "content": STRUCTURE_INSTRUCTION},
             {"role": "system", "content": f"Directives: {json.dumps(directives)}"},
-            {"role": "system", "content": f"Facts: {json.dumps(load_facts(SESSION))}"},
+            {"role": "system", "content": f"Facts: {json.dumps(facts)}"},
             {"role": "system", "content": f"Docket: {json.dumps(docket.list_tasks())}"},
-            {"role": "user", "content": user_text},
+            *convo_messages,
         ]
+
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
-        data = _parse_json(raw_out)
+        try:
+            data = json.loads(raw_out)
+        except Exception:
+            data = {"assistant_message": raw_out, "actions": []}
 
         # Speak
-        print(data.get("assistant_message", ""))
+        assistant_message = data.get("assistant_message", "")
+        if assistant_message:
+            print(assistant_message)
+            # 🔁 persist assistant reply to conversation history
+            record_assistant(SESSION, assistant_message)
 
-        # Save facts (defensive)
+        # Save facts (via CM)
         for f in data.get("facts_to_save") or []:
             if isinstance(f, dict):
                 k, v = f.get("key"), f.get("value")
                 if k:
-                    save_fact(SESSION, k, str(v).strip(".! "))
+                    cm_save_fact(SESSION, k, str(v).strip(".! "))
             elif isinstance(f, str):
-                save_fact(SESSION, "unspecified_fact", f.strip(".! "))
+                cm_save_fact(SESSION, "unspecified_fact", f.strip(".! "))
 
         # Save tasks (general)
         for t in data.get("tasks_to_add") or []:
