@@ -9,30 +9,18 @@ from executor.connectors.openai_client import OpenAIClient
 from executor.utils.docket import Docket
 
 # ----------------------------- Memory helpers -----------------------------
-def _try_import_cm():
-    try:
-        from executor.plugins.conversation_manager.conversation_manager import (  # type: ignore
-            save_turn as cm_save_turn,
-            get_turns as cm_get_turns,
-            load_facts as cm_load_facts,
-            save_fact as cm_save_fact,
-        )
-        return cm_save_turn, cm_get_turns, cm_load_facts, cm_save_fact
-    except Exception:
-        return None, None, None, None
-
-_CM_SAVE_TURN, _CM_GET_TURNS, _CM_LOAD_FACTS, _CM_SAVE_FACT = _try_import_cm()
-
 _MEM_DIR = os.path.join(".executor", "memory")
 os.makedirs(_MEM_DIR, exist_ok=True)
+
 
 def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _path(session: str, suffix: str) -> str:
     return os.path.join(_MEM_DIR, f"{session}_{suffix}.json")
 
-# Facts
+
 def load_facts(session: str) -> Dict[str, Any]:
     p = _path(session, "facts")
     if os.path.exists(p):
@@ -42,6 +30,7 @@ def load_facts(session: str) -> Dict[str, Any]:
             return {}
     return {}
 
+
 def save_fact(session: str, key: str, value: Any) -> None:
     p = _path(session, "facts")
     facts = load_facts(session)
@@ -49,7 +38,7 @@ def save_fact(session: str, key: str, value: Any) -> None:
     with open(p, "w", encoding="utf-8") as f:
         json.dump(facts, f, indent=2)
 
-# Turns
+
 def load_turns(session: str) -> List[Dict[str, str]]:
     p = os.path.join(_MEM_DIR, f"{session}.jsonl")
     if not os.path.exists(p):
@@ -64,10 +53,12 @@ def load_turns(session: str) -> List[Dict[str, str]]:
             continue
     return turns[-50:]
 
+
 def save_turn(session: str, role: str, content: Any) -> None:
     rec = {"ts": _ts(), "role": role, "content": content}
     with open(os.path.join(_MEM_DIR, f"{session}.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
+
 
 # Pending questions
 def load_pending(session: str) -> List[Dict[str, Any]]:
@@ -79,15 +70,26 @@ def load_pending(session: str) -> List[Dict[str, Any]]:
             return []
     return []
 
+
 def save_pending(session: str, qs: List[Dict[str, Any]]) -> None:
     p = _path(session, "questions")
     with open(p, "w", encoding="utf-8") as f:
         json.dump(qs, f, indent=2)
 
+
 def add_pending(session: str, scope: str, question: str) -> None:
     qs = load_pending(session)
-    qs.append({"id": len(qs)+1, "scope": scope, "question": question, "status": "pending", "asked_ts": _ts()})
+    qs.append(
+        {
+            "id": len(qs) + 1,
+            "scope": scope,
+            "question": question,
+            "status": "pending",
+            "asked_ts": _ts(),
+        }
+    )
     save_pending(session, qs)
+
 
 # ----------------------------- Directives -----------------------------
 _DEFAULT_DIRECTIVES = {
@@ -99,6 +101,7 @@ _DEFAULT_DIRECTIVES = {
     "brainstorm_paused": [],
 }
 
+
 def load_directives() -> Dict[str, Any]:
     p = _path("global", "directives")
     merged = dict(_DEFAULT_DIRECTIVES)
@@ -109,6 +112,7 @@ def load_directives() -> Dict[str, Any]:
             pass
     return merged
 
+
 # ----------------------------- Helpers -----------------------------
 def _parse_json(s: str) -> Dict[str, Any]:
     try:
@@ -116,19 +120,32 @@ def _parse_json(s: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
-def _assessment_trigger(text: str) -> bool:
-    t = text.lower()
-    return any(p in t for p in ["improve", "tighten", "optimiz", "streamlin", "help with", "my goal is", "how can i"])
+
+# ----------------------------- Instruction Contract -----------------------------
+STRUCTURE_INSTRUCTION = (
+    "You are the Cortex Executor Orchestrator.\n"
+    "Behaviors:\n"
+    "- Chat-first: respond naturally, but also emit structured JSON.\n"
+    "- If the user describes adding, extending, or building a feature in plain English "
+    "('please add...', 'extend repl to...', 'create a module for...'), ALWAYS infer the plugin and goal "
+    "and output them in 'actions'. Do not just chat or ask clarifications.\n"
+    "- If input implies goals/future-cast ('improve...', 'my goal is...', 'how can I...'), enter assessment mode "
+    "and generate diagnostic questions; save unanswered ones as pending.\n"
+    "- If the user replies with a short bare answer right after a question, map it back to the last pending question "
+    "and save as a fact.\n"
+    "- Always return JSON with keys: assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions.\n"
+)
+
 
 # ----------------------------- Main -----------------------------
 SESSION = "repl"
+
 
 def main():
     print("Executor — chat naturally. Type 'quit' to exit.")
     client = OpenAIClient()
     docket = Docket(namespace=SESSION)
     directives = load_directives()
-
     reminded = False
 
     for raw in sys.stdin:
@@ -139,14 +156,17 @@ def main():
             print("bye")
             return
 
-        # Check pending questions first turn
+        # Remind about pending Qs on first input
         if not reminded:
             pending = [q for q in load_pending(SESSION) if q["status"] == "pending"]
             if pending:
-                print(f"[Butler] You still have {len(pending)} pending question(s). You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
+                print(
+                    f"[Butler] You still have {len(pending)} pending question(s). "
+                    "You can 'answer_questions', 'skip_questions', or 'clear_questions'."
+                )
             reminded = True
 
-        # Handle pending question commands
+        # Pending question commands
         if user_text.lower().startswith("answer_questions"):
             qs = load_pending(SESSION)
             for q in qs:
@@ -154,7 +174,7 @@ def main():
                     print(f"Q: {q['question']}")
                     ans = sys.stdin.readline().strip()
                     if ans:
-                        save_fact(SESSION, q.get("scope","unspecified_fact"), ans.strip(".! "))
+                        save_fact(SESSION, q.get("scope", "unspecified_fact"), ans.strip(".! "))
                         q["status"] = "answered"
             save_pending(SESSION, qs)
             continue
@@ -168,19 +188,12 @@ def main():
             print("[Butler] All pending questions cleared.")
             continue
 
-        # Messages for model
+        # Build prompt for model
         msgs = [
-            {"role": "system", "content": "You are the Cortex Executor Orchestrator."},
+            {"role": "system", "content": STRUCTURE_INSTRUCTION},
             {"role": "system", "content": f"Directives: {json.dumps(directives)}"},
             {"role": "system", "content": f"Facts: {json.dumps(load_facts(SESSION))}"},
             {"role": "system", "content": f"Docket: {json.dumps(docket.list_tasks())}"},
-            {"role": "system", "content": (
-                "Behaviors:\n"
-                "- If the user describes extending, building, approving, or rejecting in natural language, infer the plugin and goal and output them in 'actions'.\n"
-                "- If input implies goals/future-cast, enter assessment mode and generate diagnostic questions. Save unanswered ones to pending questions.\n"
-                "- If the user replies with a short bare answer right after a question, map it back to the last pending question and save as a fact.\n"
-                "- Always return JSON {assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions}."
-            )},
             {"role": "user", "content": user_text},
         ]
 
@@ -189,7 +202,7 @@ def main():
 
         print(data.get("assistant_message", ""))
 
-        # Save facts (defensive)
+        # Save facts
         for f in data.get("facts_to_save") or []:
             if isinstance(f, dict):
                 k, v = f.get("key"), f.get("value")
@@ -203,9 +216,10 @@ def main():
             if isinstance(t, dict) and t.get("title"):
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
-        # Save pending questions if model proposes them
+        # Save pending questions
         for q in data.get("questions") or []:
             add_pending(SESSION, directives.get("scope") or "general", q)
+
 
 if __name__ == "__main__":
     main()
