@@ -10,6 +10,19 @@ class FileEdit:
     content: str
     kind: str  # "code"|"test"|"doc"
 
+"""
+Self-repair module.
+Provides hooks for automated patch attempts.
+"""
+
+def attempt_self_repair(error: dict) -> dict:
+    """
+    Placeholder self-repair implementation.
+    Real logic would analyze the error and try a patch.
+    For now, just return a no-op error result so tests can monkeypatch this.
+    """
+    return {"status": "error", "details": {"msg": "self_repair not implemented"}}
+
 def apply_file_edits(edits: List[FileEdit], worktree: str) -> None:
     for e in edits:
         abs_path = os.path.join(worktree, e.path)
