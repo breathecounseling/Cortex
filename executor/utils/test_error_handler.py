@@ -6,55 +6,42 @@ Validates error classification and repair loop integration.
 import pytest
 import executor.utils.error_handler as error_handler
 
+
 def test_classify_import_error():
     msg = "ModuleNotFoundError: No module named 'foo'"
     result = error_handler.classify_error(msg)
     assert result == "import_error"
+
 
 def test_classify_syntax_error():
     msg = "SyntaxError: invalid syntax"
     result = error_handler.classify_error(msg)
     assert result == "syntax_error"
 
+
 def test_classify_test_failure():
     msg = "AssertionError: expected 2, got 3"
     result = error_handler.classify_error(msg)
     assert result == "test_failure"
+
 
 def test_classify_runtime_error():
     msg = "Traceback (most recent call last): RuntimeError: failure"
     result = error_handler.classify_error(msg)
     assert result == "runtime_error"
 
+
 def test_classify_unknown():
     msg = "This is some random error"
     result = error_handler.classify_error(msg)
     assert result == "unknown"
 
-def classify_error(err: Exception) -> Classification:
-    # Handle ExecutorError directly
-    if isinstance(err, ExecutorError):
-        ...
-
-    # Handle common raw Python errors
-    if isinstance(err, ModuleNotFoundError):
-        return Classification(
-            name="import_error",
-            details={"msg": str(err)},
-            repair_proposal="Check that the module is installed and PYTHONPATH is correct.",
-        )
-
-    # default/fallback
-    return Classification(
-        name=type(err).__name__,
-        details={},
-        repair_proposal="Surface full stack to user; collect context for targeted repair.",
-    )
 
 def test_explain_error_import():
     err = {"message": "ModuleNotFoundError: No module named 'bar'"}
     explanation = error_handler.explain_error(err)
     assert "import_error" in explanation
+
 
 def test_attempt_repair_runs(monkeypatch):
     """
