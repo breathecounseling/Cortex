@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict
 
+from executor.utils import self_repair   # module-level import so tests can patch it
+
 
 @dataclass
 class Classification:
@@ -19,7 +21,7 @@ class ExecutorError(Exception):
 
 def classify_error(err) -> Classification | str:
     """
-    Classify an error. Can accept either an Exception instance or a string traceback.
+    Classify an error. Accepts either an Exception instance or a string traceback.
     Returns either a Classification (for Exceptions) or a simple string label (for str inputs).
     """
     # Case 1: raw string tracebacks (used in tests)
@@ -59,10 +61,10 @@ def classify_error(err) -> Classification | str:
             return Classification(
                 name="malformed_response",
                 details=err.details,
-                repair_proposal="Parse fenced ```json; retry with explicit schema.",
+                repair_proposal="Parse fenced ```json blocks; retry with explicit schema.",
             )
 
-    # Case 3: generic Python exceptions
+    # Case 3: common Python built-in exceptions
     if isinstance(err, ModuleNotFoundError):
         return Classification(
             name="import_error",
@@ -108,8 +110,6 @@ def attempt_repair(err: Dict[str, Any], retries: int = 2) -> Dict[str, Any]:
     Attempt a self-repair loop.
     Uses self_repair.attempt_self_repair if available.
     """
-    from executor.utils import self_repair
-
     classification = classify_error(err.get("message", ""))
     last_result = None
     for _ in range(retries):
