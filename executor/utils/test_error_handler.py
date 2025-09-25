@@ -4,7 +4,7 @@ Validates error classification and repair loop integration.
 """
 
 import pytest
-from executor.utils import error_handler
+import executor.utils.error_handler as error_handler
 
 def test_classify_import_error():
     msg = "ModuleNotFoundError: No module named 'foo'"
@@ -30,6 +30,13 @@ def test_classify_unknown():
     msg = "This is some random error"
     result = error_handler.classify_error(msg)
     assert result == "unknown"
+
+def test_classify_import_error():
+    try:
+        raise ModuleNotFoundError("No module named 'foo'")
+    except ModuleNotFoundError as e:
+        result = error_handler.classify_error(e)
+    assert result.name == "import_error"
 
 def test_explain_error_import():
     err = {"message": "ModuleNotFoundError: No module named 'bar'"}
