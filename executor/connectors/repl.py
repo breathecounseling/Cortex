@@ -1,95 +1,122 @@
+# executor/connectors/repl.py
 from __future__ import annotations
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple, Optional
 
 from executor.connectors.openai_client import OpenAIClient
+from executor.plugins.builder.extend_plugin import extend_plugin
 from executor.utils.docket import Docket
 
-# ----------------------------- Memory helpers -----------------------------
+# ----------------------------- Paths & helpers -----------------------------
 _MEM_DIR = os.path.join(".executor", "memory")
 os.makedirs(_MEM_DIR, exist_ok=True)
-
 
 def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
 def _path(session: str, suffix: str) -> str:
     return os.path.join(_MEM_DIR, f"{session}_{suffix}.json")
 
+SESSION = "repl"
 
+def _read_json(path: str, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return default
+
+def _write_json(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+# ----------------------------- Facts & turns -----------------------------
 def load_facts(session: str) -> Dict[str, Any]:
-    p = _path(session, "facts")
-    if os.path.exists(p):
-        try:
-            return json.load(open(p, "r", encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
+    return _read_json(_path(session, "facts"), {})
 
 def save_fact(session: str, key: str, value: Any) -> None:
-    p = _path(session, "facts")
     facts = load_facts(session)
     facts[key] = value
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(facts, f, indent=2)
-
+    _write_json(_path(session, "facts"), facts)
 
 def load_turns(session: str) -> List[Dict[str, str]]:
     p = os.path.join(_MEM_DIR, f"{session}.jsonl")
     if not os.path.exists(p):
         return []
-    turns = []
-    for line in open(p, "r", encoding="utf-8"):
-        try:
-            rec = json.loads(line)
-            if rec.get("role") in {"user", "assistant", "system"}:
-                turns.append({"role": rec["role"], "content": rec["content"]})
-        except Exception:
-            continue
-    return turns[-50:]
-
+    out = []
+    with open(p, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+                if rec.get("role") in {"user", "assistant", "system"}:
+                    out.append({"role": rec["role"], "content": rec["content"]})
+            except Exception:
+                continue
+    return out[-50:]
 
 def save_turn(session: str, role: str, content: Any) -> None:
     rec = {"ts": _ts(), "role": role, "content": content}
     with open(os.path.join(_MEM_DIR, f"{session}.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
 
+# ----------------------------- Pending questions -----------------------------
+def load_pending_q(session: str) -> List[Dict[str, Any]]:
+    return _read_json(_path(session, "questions"), [])
 
-# Pending questions
-def load_pending(session: str) -> List[Dict[str, Any]]:
-    p = _path(session, "questions")
-    if os.path.exists(p):
-        try:
-            return json.load(open(p, "r", encoding="utf-8"))
-        except Exception:
-            return []
-    return []
+def save_pending_q(session: str, qs: List[Dict[str, Any]]) -> None:
+    _write_json(_path(session, "questions"), qs)
 
+def add_pending_q(session: str, scope: str, question: str) -> None:
+    qs = load_pending_q(session)
+    qs.append({"id": len(qs)+1, "scope": scope, "question": question, "status": "pending", "asked_ts": _ts()})
+    save_pending_q(session, qs)
 
-def save_pending(session: str, qs: List[Dict[str, Any]]) -> None:
-    p = _path(session, "questions")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(qs, f, indent=2)
+# ----------------------------- Action queue (build/extend) -----------------------------
+def load_actions(session: str) -> List[Dict[str, Any]]:
+    return _read_json(_path(session, "actions"), [])
 
+def save_actions(session: str, acts: List[Dict[str, Any]]) -> None:
+    _write_json(_path(session, "actions"), acts)
 
-def add_pending(session: str, scope: str, question: str) -> None:
-    qs = load_pending(session)
-    qs.append(
-        {
-            "id": len(qs) + 1,
-            "scope": scope,
-            "question": question,
-            "status": "pending",
-            "asked_ts": _ts(),
-        }
-    )
-    save_pending(session, qs)
+def queue_action(session: str, plugin: str, goal: str, status: str = "pending") -> str:
+    acts = load_actions(session)
+    aid = str(len(acts)+1)
+    acts.append({"id": aid, "plugin": plugin, "goal": goal, "status": status, "queued_ts": _ts()})
+    save_actions(session, acts)
+    return aid
 
+def mark_last_action_ready(session: str) -> Optional[Dict[str, Any]]:
+    acts = load_actions(session)
+    for a in reversed(acts):
+        if a["status"] == "pending":
+            a["status"] = "ready"
+            save_actions(session, acts)
+            return a
+    return None
+
+def pop_ready_actions(session: str) -> List[Dict[str, Any]]:
+    acts = load_actions(session)
+    ready = [a for a in acts if a["status"] == "ready"]
+    for a in acts:
+        if a["status"] == "ready":
+            a["status"] = "running"
+    save_actions(session, acts)
+    return ready
+
+def complete_action(session: str, action_id: str, ok: bool) -> None:
+    acts = load_actions(session)
+    for a in acts:
+        if a["id"] == action_id:
+            a["status"] = "done" if ok else "error"
+            a["completed_ts"] = _ts()
+            break
+    save_actions(session, acts)
 
 # ----------------------------- Directives -----------------------------
 _DEFAULT_DIRECTIVES = {
@@ -101,46 +128,69 @@ _DEFAULT_DIRECTIVES = {
     "brainstorm_paused": [],
 }
 
-
 def load_directives() -> Dict[str, Any]:
     p = _path("global", "directives")
     merged = dict(_DEFAULT_DIRECTIVES)
     if os.path.exists(p):
         try:
-            merged.update(json.load(open(p, "r", encoding="utf-8")))
+            merged.update(_read_json(p, {}))
         except Exception:
             pass
     return merged
 
+# ----------------------------- Instruction contract -----------------------------
+STRUCTURE_INSTRUCTION = (
+    "You are the Cortex Executor Orchestrator.\n"
+    "Behaviors:\n"
+    "- Chat-first: respond naturally, but ALWAYS emit structured JSON.\n"
+    "- If the user describes adding, extending, or building a feature in plain English "
+    "('please add...', 'extend X...', 'create a module for...'), you MUST output an 'actions' array like "
+    "[{\"plugin\":\"<target>\",\"goal\":\"<what to build>\",\"status\":\"pending|ready\"}].\n"
+    "- If not enough detail is provided to execute safely, set status='pending' and ask clarifying 'questions'. "
+    "When the user supplies missing details, you may return status='ready'.\n"
+    "- If the user replies with a short bare answer after a question, add an item to 'facts_to_save' with the inferred key/value.\n"
+    "- Always return JSON with keys: assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions.\n"
+)
 
-# ----------------------------- Helpers -----------------------------
+# ----------------------------- Model helpers -----------------------------
 def _parse_json(s: str) -> Dict[str, Any]:
     try:
         return json.loads(s)
     except Exception:
         return {}
 
+# host-side natural-language fallback if model fails to emit actions
+_ADD_PAT = re.compile(r"\b(add|build|create|implement|extend)\b", re.I)
 
-# ----------------------------- Instruction Contract -----------------------------
-STRUCTURE_INSTRUCTION = (
-    "You are the Cortex Executor Orchestrator.\n"
-    "Behaviors:\n"
-    "- Chat-first: respond naturally, but also emit structured JSON.\n"
-    "- If the user describes adding, extending, or building a feature in plain English "
-    "('please add...', 'extend repl to...', 'create a module for...'), ALWAYS infer the plugin and goal "
-    "and output them in 'actions'. Do not just chat or ask clarifications.\n"
-    "- If input implies goals/future-cast ('improve...', 'my goal is...', 'how can I...'), enter assessment mode "
-    "and generate diagnostic questions; save unanswered ones as pending.\n"
-    "- If the user replies with a short bare answer right after a question, map it back to the last pending question "
-    "and save as a fact.\n"
-    "- Always return JSON with keys: assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions.\n"
-)
+def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
+    if not _ADD_PAT.search(text):
+        return None
+    # crude heuristic for plugin
+    plugin = "repl"
+    m = re.search(r"\bextend\s+([a-zA-Z_][\w\-]*)", text, re.I)
+    if m:
+        plugin = m.group(1).lower().replace("-", "_")
+    # goal is the whole request (clean)
+    goal = text.strip()
+    return {"plugin": plugin, "goal": goal, "status": "pending"}
 
+# ----------------------------- Action execution -----------------------------
+def _execute_ready_actions(docket: Docket) -> None:
+    ready = pop_ready_actions(SESSION)
+    for a in ready:
+        plugin, goal, aid = a["plugin"], a["goal"], a["id"]
+        try:
+            res = extend_plugin(plugin, goal)
+            ok = res.get("status") == "ok"
+            complete_action(SESSION, aid, ok)
+            if ok:
+                docket.complete(docket.add(f"completed: extend {plugin}: {goal}"))
+            print(json.dumps({"action": a, "result": res}, indent=2))
+        except Exception as e:
+            complete_action(SESSION, aid, False)
+            print(json.dumps({"action": a, "error": f"{type(e).__name__}: {e}"}, indent=2))
 
-# ----------------------------- Main -----------------------------
-SESSION = "repl"
-
-
+# ----------------------------- Main loop -----------------------------
 def main():
     print("Executor — chat naturally. Type 'quit' to exit.")
     client = OpenAIClient()
@@ -156,39 +206,45 @@ def main():
             print("bye")
             return
 
-        # Remind about pending Qs on first input
+        # simple “build now” intents
+        if user_text.lower() in {"go ahead and build it", "proceed", "do it", "build now", "execute"}:
+            a = mark_last_action_ready(SESSION)
+            if a:
+                print(f"[Butler] Marked action ready: extend {a['plugin']}: {a['goal']}. Executing…")
+                _execute_ready_actions(docket)
+            else:
+                print("[Butler] I don’t have a pending action to build yet.")
+            continue
+
+        # pending question reminder on first input
         if not reminded:
-            pending = [q for q in load_pending(SESSION) if q["status"] == "pending"]
-            if pending:
-                print(
-                    f"[Butler] You still have {len(pending)} pending question(s). "
-                    "You can 'answer_questions', 'skip_questions', or 'clear_questions'."
-                )
+            pqs = [q for q in load_pending_q(SESSION) if q["status"] == "pending"]
+            if pqs:
+                print(f"[Butler] You still have {len(pqs)} pending question(s). You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
             reminded = True
 
-        # Pending question commands
-        if user_text.lower().startswith("answer_questions"):
-            qs = load_pending(SESSION)
+        # pending question commands
+        low = user_text.lower()
+        if low.startswith("answer_questions"):
+            qs = load_pending_q(SESSION)
             for q in qs:
                 if q["status"] == "pending":
                     print(f"Q: {q['question']}")
                     ans = sys.stdin.readline().strip()
                     if ans:
-                        save_fact(SESSION, q.get("scope", "unspecified_fact"), ans.strip(".! "))
+                        save_fact(SESSION, (directives.get("scope") or "unspecified_fact"), ans.strip(".! "))
                         q["status"] = "answered"
-            save_pending(SESSION, qs)
+            save_pending_q(SESSION, qs)
             continue
-
-        if user_text.lower().startswith("skip_questions") or user_text.lower() in {"not now", "no", "skip"}:
+        if low.startswith("skip_questions") or low in {"not now", "no", "skip"}:
             print("[Butler] Understood, I’ll hold the pending questions for later.")
             continue
-
-        if user_text.lower().startswith("clear_questions"):
-            save_pending(SESSION, [])
+        if low.startswith("clear_questions"):
+            save_pending_q(SESSION, [])
             print("[Butler] All pending questions cleared.")
             continue
 
-        # Build prompt for model
+        # Build model messages
         msgs = [
             {"role": "system", "content": STRUCTURE_INSTRUCTION},
             {"role": "system", "content": f"Directives: {json.dumps(directives)}"},
@@ -196,13 +252,13 @@ def main():
             {"role": "system", "content": f"Docket: {json.dumps(docket.list_tasks())}"},
             {"role": "user", "content": user_text},
         ]
-
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
         data = _parse_json(raw_out)
 
+        # Speak
         print(data.get("assistant_message", ""))
 
-        # Save facts
+        # Save facts (defensive)
         for f in data.get("facts_to_save") or []:
             if isinstance(f, dict):
                 k, v = f.get("key"), f.get("value")
@@ -211,15 +267,33 @@ def main():
             elif isinstance(f, str):
                 save_fact(SESSION, "unspecified_fact", f.strip(".! "))
 
-        # Save tasks
+        # Save tasks (general)
         for t in data.get("tasks_to_add") or []:
             if isinstance(t, dict) and t.get("title"):
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
-        # Save pending questions
-        for q in data.get("questions") or []:
-            add_pending(SESSION, directives.get("scope") or "general", q)
+        # Queue actions from model
+        actions = data.get("actions") or []
+        for a in actions:
+            plugin = (a.get("plugin") or "").strip()
+            goal = (a.get("goal") or "").strip()
+            status = (a.get("status") or "pending").strip().lower()
+            if plugin and goal:
+                aid = queue_action(SESSION, plugin, goal, status=status)
+                print(f"[Butler] Queued action {aid}: extend {plugin}: {goal} (status={status})")
 
+        # Host-side fallback inference if model didn’t output actions
+        if not actions:
+            inferred = _infer_action_from_text(user_text)
+            if inferred:
+                aid = queue_action(SESSION, inferred["plugin"], inferred["goal"], status="pending")
+                print(f"[Butler] Noted your build request and queued action {aid}: extend {inferred['plugin']}: {inferred['goal']} (status=pending).")
+                print("[Butler] I’ll ask for any missing details, then you can say 'go ahead and build it' to execute.")
+                continue
+
+        # If model already marked ready, execute now
+        if any((a.get("status") or "").lower() == "ready" for a in actions):
+            _execute_ready_actions(docket)
 
 if __name__ == "__main__":
     main()
