@@ -1,4 +1,3 @@
-# executor/connectors/repl.py
 from __future__ import annotations
 import json
 import os
@@ -160,29 +159,6 @@ def main():
             print("bye")
             return
 
-        # Approve/reject idea tasks
-        if user_text.lower().startswith("approve "):
-            tid = user_text.split(" ", 1)[1].strip()
-            tasks = docket.list_tasks()
-            for t in tasks:
-                if t["id"] == tid and t["title"].startswith("[idea]"):
-                    t["title"] = t["title"].replace("[idea] ", "", 1)
-                    t["status"] = "todo"
-                    docket._save()
-                    print(f"✅ Promoted idea {tid} to TODO: {t['title']}")
-                    break
-            continue
-
-        if user_text.lower().startswith("reject "):
-            tid = user_text.split(" ", 1)[1].strip()
-            tasks = docket.list_tasks()
-            new_tasks = [t for t in tasks if t["id"] != tid]
-            if len(new_tasks) != len(tasks):
-                docket._data["tasks"] = new_tasks
-                docket._save()
-                print(f"❌ Rejected idea {tid}, removed from docket.")
-            continue
-
         msgs = [
             {"role": "system", "content": "You are the Cortex Executor Orchestrator."},
             {"role": "system", "content": f"Directives: {json.dumps(directives)}"},
@@ -203,15 +179,20 @@ def main():
         data = _parse_json(raw_out)
 
         print(data.get("assistant_message", ""))
-            for f in data.get("facts_to_save") or []:
-                if isinstance(f, dict):
-                    k, v = f.get("key"), f.get("value")
-                    if k:
-                        save_fact(SESSION, k, v)
-                elif isinstance(f, str):
-                    # fallback: treat as bare value, try to map to last pending question if available
-                    save_fact(SESSION, "unspecified_fact", f.strip())
 
+        # Save facts safely (accept dicts or strings)
+        for f in data.get("facts_to_save") or []:
+            if isinstance(f, dict):
+                k, v = f.get("key"), f.get("value")
+                if k:
+                    save_fact(SESSION, k, v)
+            elif isinstance(f, str):
+                save_fact(SESSION, "unspecified_fact", f.strip())
+
+        # Save tasks
+        for t in data.get("tasks_to_add") or []:
+            if isinstance(t, dict) and t.get("title"):
+                docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
 if __name__ == "__main__":
     main()
