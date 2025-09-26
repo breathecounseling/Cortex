@@ -17,7 +17,19 @@ class FileEdit:
     content: str
     kind: str  # "code" | "test" | "doc"
 
-# ---------------- JSON helpers ----------------
+# ---------------- Utilities ----------------
+
+def _normalize_repo_map(repo_map: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert sets to lists so repo_map is JSON-serializable."""
+    def convert(obj):
+        if isinstance(obj, set):
+            return list(obj)
+        if isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [convert(x) for x in obj]
+        return obj
+    return convert(repo_map)
 
 def _parse_json_str(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
@@ -26,7 +38,6 @@ def _parse_json_str(s: str) -> Dict[str, Any]:
     try:
         return json.loads(s)
     except json.JSONDecodeError:
-        import re
         m = re.search(r"```json\s*(.*?)\s*```", s, re.DOTALL)
         if m: return json.loads(m.group(1))
         b, e = s.find("{"), s.rfind("}")
@@ -49,8 +60,6 @@ def _update_manifest(spec, goal: str) -> None:
         manifest["capabilities"].append(goal)
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
-
-# ---------------- File materialization ----------------
 
 def _materialize_files(spec, data: Dict[str, Any]) -> List[FileEdit]:
     files = []
@@ -88,13 +97,13 @@ def _call_model_for_goal(client: OpenAIClient, spec, goal: str, repo_map: Dict[s
 def _call_model_for_repair(client: OpenAIClient, report: str, suspect_files: List[str], proposal: str, repo_map: Dict[str, Any]) -> Dict[str, Any]:
     system = (
         "You are repairing a broken Python project.\n"
-        "You will be given pytest errors, a repair proposal, a repo map, and one or more suspect files.\n"
+        "You will be given an error report, a repair proposal, a repo map, and suspect files.\n"
         "Respond ONLY with JSON: { rationale, changelog, files:[{path,content,kind}] }.\n"
         "- Fix the errors without breaking other code.\n"
         "- Do not reintroduce placeholders.\n"
         "- Keep changes minimal and targeted.\n"
     )
-    user = f"Pytest report:\n{report}\n\nRepair proposal:\n{proposal}\n\nRepo map:\n{json.dumps(repo_map, indent=2)}\n"
+    user = f"Error report:\n{report}\n\nRepair proposal:\n{proposal}\n\nRepo map:\n{json.dumps(repo_map, indent=2)}\n"
     for path in suspect_files:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -119,7 +128,7 @@ def _apply_and_test(spec, files: List[FileEdit], *, ci: bool) -> tuple[bool, Any
 
 def _extract_suspects_from_traceback(report: str) -> List[str]:
     suspects = []
-    for line in report.splitlines():
+    for line in str(report).splitlines():
         m = re.search(r'File "(.+?)", line \d+', line)
         if m:
             path = m.group(1)
@@ -136,7 +145,7 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
         raise ExecutorError("plugin_not_found", details={"identifier": plugin_identifier, "why": str(e)})
 
     client = OpenAIClient()
-    repo_map = repo_analyzer.scan_repo()  # always include repo context
+    repo_map = _normalize_repo_map(repo_analyzer.scan_repo())
 
     attempts = 0
     max_attempts = 3
@@ -144,34 +153,43 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
 
     while attempts < max_attempts:
         attempts += 1
-        if attempts == 1:
-            data = _call_model_for_goal(client, spec, user_goal, repo_map)
-        else:
-            suspects = []
-            if last_report:
-                suspects = _extract_suspects_from_traceback(last_report)
-            if not suspects:
-                suspects = [spec.file_path]
-            data = _call_model_for_repair(client, last_report, suspects, proposal or "Fix the errors.", repo_map)
+        try:
+            if attempts == 1:
+                data = _call_model_for_goal(client, spec, user_goal, repo_map)
+            else:
+                suspects = []
+                if last_report:
+                    suspects = _extract_suspects_from_traceback(last_report)
+                if not suspects:
+                    suspects = [spec.file_path]
+                data = _call_model_for_repair(client, last_report, suspects, proposal or "Fix the errors.", repo_map)
 
-        files = _materialize_files(spec, data)
-        if not files:
-            return {"status": "model_error", "error": "empty_files"}
+            files = _materialize_files(spec, data)
+            if not files:
+                raise ExecutorError("model_error", details={"why": "no files generated"})
 
-        success, result = _apply_and_test(spec, files, ci=ci)
-        if success:
-            _update_manifest(spec, user_goal)
-            return {
-                "status": "ok",
-                "files": [f.path for f in files],
-                "changelog": data.get("changelog"),
-                "rationale": data.get("rationale"),
-            }
+            success, result = _apply_and_test(spec, files, ci=ci)
+            if success:
+                _update_manifest(spec, user_goal)
+                return {
+                    "status": "ok",
+                    "files": [f.path for f in files],
+                    "changelog": data.get("changelog"),
+                    "rationale": data.get("rationale"),
+                }
 
-        # on failure → classify + loop
-        err = ExecutorError("tests_failed", details={"report": result.report})
-        classification = classify_error(err)
-        proposal = classification.repair_proposal
-        last_report = result.report
+            # failed tests
+            err = ExecutorError("tests_failed", details={"report": result.report})
+            classification = classify_error(err)
+            proposal = classification.repair_proposal
+            last_report = result.report
 
-    return {"status": "tests_failed", "report": last_report, "proposal": proposal}
+        except Exception as e:
+            # Any error goes through repair loop
+            report = getattr(e, "details", None) or str(e)
+            classification = classify_error(e if isinstance(e, ExecutorError) else ExecutorError("runtime_error", details={"report": str(e)}))
+            proposal = getattr(classification, "repair_proposal", "Fix the errors.")
+            last_report = report
+            # loop continues until max_attempts
+
+    return {"status": "failed", "report": last_report, "proposal": proposal}
