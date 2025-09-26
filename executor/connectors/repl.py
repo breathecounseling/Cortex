@@ -90,6 +90,10 @@ def complete_action(session: str, action_id: str, ok: bool) -> None:
             break
     save_actions(session, acts)
 
+def clear_actions(session: str) -> None:
+    """Wipe all queued/active actions."""
+    save_actions(session, [])
+
 # ----------------------------- Directives -----------------------------
 _DEFAULT_DIRECTIVES = {
     "interaction_style": "chat-first",
@@ -131,7 +135,6 @@ def _parse_json(s: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
-# host-side natural-language fallback if model fails to emit actions
 _ADD_PAT = re.compile(r"\b(add|build|create|implement|extend)\b", re.I)
 
 def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
@@ -146,13 +149,12 @@ def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
 
 # ----------------------------- Action execution -----------------------------
 def _execute_ready_actions(docket: Docket) -> None:
-    from executor.plugins import repo_analyzer
+    from executor.plugins.repo_analyzer import repo_analyzer
     from executor.plugins.builder import builder
 
     ready = pop_ready_actions(SESSION)
     for a in ready:
         raw_name, goal, aid = a["plugin"], a["goal"], a["id"]
-
         plugin = raw_name.strip().lower().replace(" ", "_").replace("-", "_")
 
         try:
@@ -228,8 +230,11 @@ def main():
             save_pending_q(SESSION, [])
             print("[Butler] All pending questions cleared.")
             continue
+        if low.startswith("clear_actions"):
+            clear_actions(SESSION)
+            print("[Butler] All pending actions cleared.")
+            continue
 
-        # Unified conversation manager
         cm_result = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
         history_msgs = cm_result.get("messages", [])
         facts = cm.load_facts(SESSION)
