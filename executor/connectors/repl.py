@@ -91,7 +91,6 @@ def complete_action(session: str, action_id: str, ok: bool) -> None:
     save_actions(session, acts)
 
 def clear_actions(session: str) -> None:
-    """Wipe all queued/active actions."""
     save_actions(session, [])
 
 # ----------------------------- Directives -----------------------------
@@ -162,10 +161,10 @@ def _execute_ready_actions(docket: Docket) -> None:
                 res = extend_plugin(plugin, goal)
             except Exception as e:
                 if "plugin_not_found" in str(e):
-                    plugins = repo_analyzer.scan_repo()
-                    if plugin not in plugins:
-                        print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
-                        builder.main(plugin_name=plugin, description=f"Auto-generated for goal: {goal}")
+                    # Scaffold plugin first
+                    print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
+                    builder.main(plugin_name=plugin, description=f"Auto-generated for goal: {goal}")
+                    # Immediately extend with goal so it’s functional
                     res = extend_plugin(plugin, goal)
                 else:
                     raise
@@ -178,7 +177,7 @@ def _execute_ready_actions(docket: Docket) -> None:
 
         except Exception as e:
             complete_action(SESSION, aid, False)
-            print(json.dumps({"action": a, "error": f"{type(e).__name__}: {e}"}, indent=2))
+            print(json.dumps({"action": a, "error": f'{type(e).__name__}: {e}'}, indent=2))
 
 # ----------------------------- Main loop -----------------------------
 def main():
