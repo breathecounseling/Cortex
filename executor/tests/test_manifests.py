@@ -1,8 +1,6 @@
-# executor/tests/test_manifests.py
 import os
 import json
-import shutil
-import tempfile
+import importlib
 import pytest
 
 from executor.plugins.builder.builder import main as build_plugin
@@ -10,36 +8,46 @@ from executor.plugins.builder.extend_plugin import extend_plugin
 
 BASE = os.path.join("executor", "plugins")
 
-def test_all_plugins_have_manifest():
+
+def test_all_plugins_have_manifest_and_specialist():
     """
-    Every plugin folder should include plugin.json.
+    Every plugin folder should include plugin.json and specialist.py,
+    and manifest must include a 'specialist' path.
     """
     for entry in os.listdir(BASE):
         plugin_dir = os.path.join(BASE, entry)
-        if os.path.isdir(plugin_dir):
-            manifest_path = os.path.join(plugin_dir, "plugin.json")
-            assert os.path.exists(manifest_path), f"{entry} missing plugin.json"
+        if not os.path.isdir(plugin_dir):
+            continue
 
-
-def test_manifest_schema():
-    """
-    plugin.json must include name, description, capabilities (list).
-    """
-    for entry in os.listdir(BASE):
-        plugin_dir = os.path.join(BASE, entry)
+        # manifest must exist
         manifest_path = os.path.join(plugin_dir, "plugin.json")
-        if os.path.exists(manifest_path):
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            assert "name" in data, f"{entry} manifest missing 'name'"
-            assert "description" in data, f"{entry} manifest missing 'description'"
-            assert "capabilities" in data, f"{entry} manifest missing 'capabilities'"
-            assert isinstance(data["capabilities"], list), f"{entry} capabilities must be a list"
+        assert os.path.exists(manifest_path), f"{entry} missing plugin.json"
+
+        # load manifest
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert "name" in data, f"{entry} manifest missing 'name'"
+        assert "description" in data, f"{entry} manifest missing 'description'"
+        assert "capabilities" in data, f"{entry} manifest missing 'capabilities'"
+        assert isinstance(data["capabilities"], list), f"{entry} capabilities must be a list"
+        assert "specialist" in data, f"{entry} manifest missing 'specialist'"
+
+        # specialist file must exist
+        specialist_file = os.path.join(plugin_dir, "specialist.py")
+        assert os.path.exists(specialist_file), f"{entry} missing specialist.py"
+
+        # specialist module must import and expose contract functions
+        try:
+            spec_mod = importlib.import_module(data["specialist"])
+            for fn in ["can_handle", "handle", "describe_capabilities"]:
+                assert hasattr(spec_mod, fn), f"{entry} specialist missing {fn}"
+        except Exception as e:
+            pytest.fail(f"{entry} specialist import failed: {e}")
 
 
-def test_builder_creates_manifest(tmp_path):
+def test_builder_creates_manifest_and_specialist(tmp_path):
     """
-    Builder should scaffold plugin.json when creating a new plugin.
+    Builder should scaffold plugin.json and specialist.py.
     """
     plugin_name = "dummy_plugin"
     target = tmp_path / "executor" / "plugins" / plugin_name
@@ -57,13 +65,17 @@ def test_builder_creates_manifest(tmp_path):
             data = json.load(f)
         assert data["name"] == plugin_name
         assert isinstance(data["capabilities"], list)
+        assert "specialist" in data
+
+        specialist_file = target / "specialist.py"
+        assert specialist_file.exists(), "builder did not create specialist.py"
     finally:
         os.chdir(old_base)
 
 
-def test_extend_updates_manifest(tmp_path):
+def test_extend_updates_manifest_and_specialist(tmp_path):
     """
-    extend_plugin should update plugin.json with new capability after success.
+    extend_plugin should update plugin.json with new capability and ensure specialist exists.
     """
     plugin_name = "extender_test"
     base = tmp_path / "executor" / "plugins" / plugin_name
@@ -92,5 +104,7 @@ def test_extend_updates_manifest(tmp_path):
         with open(base / "plugin.json", "r", encoding="utf-8") as f:
             data = json.load(f)
         assert "add foo function" in data["capabilities"], "extend_plugin did not update manifest"
+        assert "specialist" in data, "extend_plugin did not ensure specialist path"
+        assert os.path.exists(base / "specialist.py"), "extend_plugin did not create specialist.py"
     finally:
         os.chdir(old_base)
