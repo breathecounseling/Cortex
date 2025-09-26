@@ -1,0 +1,43 @@
+"""
+Specialist for {{ plugin_name }} plugin.
+
+- Defines domain-specific logic for {{ plugin_name }}.
+- Must implement can_handle, handle, and describe_capabilities.
+"""
+
+from typing import Dict, Any
+
+
+def can_handle(intent: Dict[str, Any]) -> bool:
+    """
+    Return True if this specialist can handle the given intent.
+    Example: match on plugin name or goal keywords.
+    """
+    return intent.get("plugin") == "{{ plugin_name }}"
+
+
+def handle(intent: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle a structured action {plugin, goal, status, args}.
+    Must return a dict with:
+        status: "ok" | "error" | "skipped"
+        message: str (assistant-friendly message)
+        artifacts?: list[str] (optional generated files or outputs)
+        facts?: dict (optional new facts to save)
+    """
+    goal = intent.get("goal", "")
+    args = intent.get("args", {})
+
+    # TODO: implement real logic
+    return {
+        "status": "ok",
+        "message": f"[{{ plugin_name }}] successfully handled goal: {goal}",
+    }
+
+
+def describe_capabilities() -> list[str]:
+    """
+    Return a list of strings describing what this specialist can do.
+    Example: ["log workout", "analyze trends"]
+    """
+    return ["basic {{ plugin_name }} functionality"]
