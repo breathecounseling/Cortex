@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 from executor.connectors.openai_client import OpenAIClient
 from executor.plugins.repo_analyzer import repo_analyzer
 from executor.plugins.conversation_manager import conversation_manager as cm
+from executor.core.registry import SpecialistRegistry
 
 # ---------------- Contract ----------------
 
@@ -64,6 +65,8 @@ def route(user_text: str, session: str = "repl", directives: Dict[str, Any] | No
     client = OpenAIClient()
     repo_index = repo_analyzer.scan_repo()
     facts = cm.load_facts(session)
+    registry = SpecialistRegistry()
+    repo_index = registry.list_plugins()
 
     msgs = [
         {"role": "system", "content": CONTRACT_INSTRUCTION},
