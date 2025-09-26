@@ -23,6 +23,7 @@ def _path(session: str, suffix: str) -> str:
     return os.path.join(_MEM_DIR, f"{session}_{suffix}.json")
 
 SESSION = "repl"
+debug_mode = False  # toggled by debug_on/debug_off
 
 def _read_json(path: str, default):
     try:
@@ -49,7 +50,7 @@ def add_pending_q(session: str, scope: str, question: str) -> None:
     qs.append({"id": len(qs)+1, "scope": scope, "question": question, "status": "pending", "asked_ts": _ts()})
     save_pending_q(session, qs)
 
-# ----------------------------- Action queue (build/extend) -----------------------------
+# ----------------------------- Action queue -----------------------------
 def load_actions(session: str) -> List[Dict[str, Any]]:
     return _read_json(_path(session, "actions"), [])
 
@@ -100,7 +101,7 @@ def clear_actions(session: str) -> None:
 
 # ----------------------------- Directives -----------------------------
 _DEFAULT_DIRECTIVES = {
-    "interaction_style": "chat-first",
+    "interaction_style": "creative-partner",  # default style
     "clarification_mode": "one-at-a-time",
     "autonomous_mode": False,
     "standby_minutes": 15,
@@ -122,13 +123,9 @@ def load_directives() -> Dict[str, Any]:
 STRUCTURE_INSTRUCTION = (
     "You are the Cortex Executor Orchestrator.\n"
     "Behaviors:\n"
-    "- Chat-first: respond naturally, but ALWAYS emit structured JSON.\n"
-    "- If the user describes adding, extending, or building a feature in plain English "
-    "('please add...', 'extend X...', 'create a module for...'), you MUST output an 'actions' array like "
-    "[{\"plugin\":\"<target>\",\"goal\":\"<what to build>\",\"status\":\"pending|ready\"}].\n"
-    "- If not enough detail is provided to execute safely, set status='pending' and ask clarifying 'questions'. "
-    "When the user supplies missing details, you may return status='ready'.\n"
-    "- If the user replies with a short bare answer after a question, add an item to 'facts_to_save' with the inferred key/value.\n"
+    "- Act as a polite, creative, helpful partner.\n"
+    "- Chat-first: respond naturally but ALWAYS emit structured JSON.\n"
+    "- Only queue actions when the user clearly requests building/extending modules.\n"
     "- Always return JSON with keys: assistant_message, mode, questions, facts_to_save, tasks_to_add, directive_updates, ideas, actions.\n"
 )
 
@@ -151,22 +148,6 @@ def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     goal = text.strip()
     return {"plugin": plugin, "goal": goal, "status": "pending"}
 
-# ----------------------------- Conversation history role fix -----------------------------
-def _convert_turns_for_openai(turns: list[dict]) -> list[dict]:
-    """
-    Ensure all roles are valid for OpenAI API.
-    Map 'user_fact' -> 'system' with [FACT] prefix.
-    """
-    out = []
-    for t in turns:
-        role = t.get("role")
-        if role == "user_fact":
-            out.append({"role": "system", "content": f"[FACT] {t['content']}"})
-        elif role in {"user", "assistant", "system"}:
-            out.append({"role": role, "content": t.get("content", "")})
-        # skip unknown roles
-    return out
-
 # ----------------------------- Action execution -----------------------------
 def _execute_ready_actions(docket: Docket) -> None:
     from executor.plugins.repo_analyzer import repo_analyzer
@@ -176,30 +157,32 @@ def _execute_ready_actions(docket: Docket) -> None:
     for a in ready:
         raw_name, goal, aid = a["plugin"], a["goal"], a["id"]
         plugin = raw_name.strip().lower().replace(" ", "_").replace("-", "_")
-
         try:
             try:
                 res = extend_plugin(plugin, goal)
             except Exception as e:
                 if "plugin_not_found" in str(e):
-                    print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
+                    if debug_mode:
+                        print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
                     builder.main(plugin_name=plugin, description=f"Auto-generated for goal: {goal}")
                     res = extend_plugin(plugin, goal)
                 else:
                     raise
-
             ok = res.get("status") == "ok"
             complete_action(SESSION, aid, ok)
-            if ok:
-                docket.complete(docket.add(f"completed: extend {plugin}: {goal}"))
-            print(json.dumps({"action": a, "result": res}, indent=2))
-
+            if debug_mode:
+                print(json.dumps({"action": a, "result": res}, indent=2))
+            elif ok:
+                print(f"👍 Done building {plugin}.")
+            else:
+                print(f"❌ Build failed for {plugin}. See details above.")
         except Exception as e:
             complete_action(SESSION, aid, False)
-            print(json.dumps({"action": a, "error": f'{type(e).__name__}: {e}'}, indent=2))
+            print(f"❌ Build error for {plugin}: {type(e).__name__}: {e}")
 
 # ----------------------------- Main loop -----------------------------
 def main():
+    global debug_mode
     print("Executor — chat naturally. Type 'quit' to exit.")
     client = OpenAIClient()
     docket = Docket(namespace=SESSION)
@@ -210,25 +193,53 @@ def main():
         user_text = raw.strip()
         if not user_text:
             continue
+
         if user_text.lower() in {"quit", "exit"}:
             print("bye")
             return
 
+        # Debug commands
+        if user_text.lower() == "debug_on":
+            debug_mode = True
+            print("🔧 Debug mode enabled.")
+            continue
+        if user_text.lower() == "debug_off":
+            debug_mode = False
+            print("🔧 Debug mode disabled.")
+            continue
+        if user_text.lower() == "show_actions":
+            acts = load_actions(SESSION)
+            if acts:
+                print(json.dumps(acts, indent=2))
+            else:
+                print("No actions queued.")
+            continue
+        if user_text.lower() == "clear_actions":
+            clear_actions(SESSION)
+            print("All pending actions cleared.")
+            continue
+
+        # simple “build now” intents
         if user_text.lower() in {"go ahead and build it", "proceed", "do it", "build now", "execute"}:
             a = mark_last_action_ready(SESSION)
             if a:
-                print(f"[Butler] Marked action ready: extend {a['plugin']}: {a['goal']}. Executing…")
+                if not debug_mode:
+                    print(f"👌 Understood. Building {a['plugin']}…")
+                else:
+                    print(f"[Butler] Marked action ready: extend {a['plugin']}: {a['goal']}. Executing…")
                 _execute_ready_actions(docket)
             else:
-                print("[Butler] I don’t have a pending action to build yet.")
+                print("I don’t have a pending action to build yet.")
             continue
 
+        # pending question reminder on first input
         if not reminded:
             pqs = [q for q in load_pending_q(SESSION) if q["status"] == "pending"]
             if pqs:
-                print(f"[Butler] You still have {len(pqs)} pending question(s). You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
+                print(f"I have {len(pqs)} pending question(s) for you. You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
             reminded = True
 
+        # pending question commands
         low = user_text.lower()
         if low.startswith("answer_questions"):
             qs = load_pending_q(SESSION)
@@ -242,19 +253,16 @@ def main():
             save_pending_q(SESSION, qs)
             continue
         if low.startswith("skip_questions") or low in {"not now", "no", "skip"}:
-            print("[Butler] Understood, I’ll hold the pending questions for later.")
+            print("Understood, I’ll hold the pending questions for later.")
             continue
         if low.startswith("clear_questions"):
             save_pending_q(SESSION, [])
-            print("[Butler] All pending questions cleared.")
-            continue
-        if low.startswith("clear_actions"):
-            clear_actions(SESSION)
-            print("[Butler] All pending actions cleared.")
+            print("All pending questions cleared.")
             continue
 
+        # Unified conversation manager
         cm_result = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
-        history_msgs = _convert_turns_for_openai(cm_result.get("messages", []))
+        history_msgs = cm_result.get("messages", [])
         facts = cm.load_facts(SESSION)
 
         msgs = [
@@ -268,9 +276,13 @@ def main():
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
         data = _parse_json(raw_out)
 
-        print(data.get("assistant_message", ""))
-        cm.record_assistant(SESSION, data.get("assistant_message", ""))
+        # friendly assistant message
+        msg = data.get("assistant_message", "")
+        if msg:
+            print(msg)
+        cm.record_assistant(SESSION, msg)
 
+        # Save facts
         for f in data.get("facts_to_save") or []:
             if isinstance(f, dict):
                 k, v = f.get("key"), f.get("value")
@@ -279,10 +291,12 @@ def main():
             elif isinstance(f, str):
                 cm.save_fact(SESSION, "unspecified_fact", f.strip(".! "))
 
+        # Save tasks
         for t in data.get("tasks_to_add") or []:
             if isinstance(t, dict) and t.get("title"):
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
+        # Queue actions
         actions = data.get("actions") or []
         for a in actions:
             plugin = (a.get("plugin") or "").strip()
@@ -290,14 +304,18 @@ def main():
             status = (a.get("status") or "pending").strip().lower()
             if plugin and goal:
                 aid = queue_action(SESSION, plugin, goal, status=status)
-                print(f"[Butler] Queued action {aid}: extend {plugin}: {goal} (status={status})")
+                if debug_mode:
+                    print(f"[Butler] Queued action {aid}: extend {plugin}: {goal} (status={status})")
 
+        # fallback inference
         if not actions:
             inferred = _infer_action_from_text(user_text)
             if inferred:
                 aid = queue_action(SESSION, inferred["plugin"], inferred["goal"], status="pending")
-                print(f"[Butler] Noted your build request and queued action {aid}: extend {inferred['plugin']}: {inferred['goal']} (status=pending).")
-                print("[Butler] I’ll ask for any missing details, then you can say 'go ahead and build it' to execute.")
+                if debug_mode:
+                    print(f"[Butler] Noted your build request and queued action {aid}: extend {inferred['plugin']}: {inferred['goal']} (status=pending).")
+                else:
+                    print(f"Okay, I’ve noted your build request for {inferred['plugin']}. Say 'do it' when ready.")
                 continue
 
         if any((a.get("status") or "").lower() == "ready" for a in actions):
