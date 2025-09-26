@@ -1,4 +1,3 @@
-# executor/connectors/repl.py
 from __future__ import annotations
 import json
 import os
@@ -137,6 +136,7 @@ STRUCTURE_INSTRUCTION = (
     "- Surface outstanding questions, ideas, or reminders politely at session start.\n"
     "- In normal mode, hide internal logs; show them only when debug mode is on.\n"
 )
+
 # ----------------------------- Model helpers -----------------------------
 def _parse_json(s: str) -> Dict[str, Any]:
     try:
@@ -178,31 +178,38 @@ def _execute_ready_actions(docket: Docket) -> None:
         plugin = raw_name.strip().lower().replace(" ", "_").replace("-", "_")
         try:
             try:
+                print(f"🤔 Thinking about how to extend {plugin}…", flush=True)
                 res = extend_plugin(plugin, goal)
             except Exception as e:
                 if "plugin_not_found" in str(e):
                     if debug_mode:
-                        print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
+                        print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…", flush=True)
                     builder.main(plugin_name=plugin, description=f"Auto-generated for goal: {goal}")
                     res = extend_plugin(plugin, goal)
                 else:
                     raise
+
             ok = res.get("status") == "ok"
             complete_action(SESSION, aid, ok)
+
             if debug_mode:
-                print(json.dumps({"action": a, "result": res}, indent=2))
+                print(json.dumps({"action": a, "result": res}, indent=2), flush=True)
             elif ok:
-                print(f"👍 Done building {plugin}.")
+                print(f"👍 Done building {plugin}.", flush=True)
             else:
-                print(f"❌ Build failed for {plugin}. See details above.")
+                print(f"❌ Build failed for {plugin}. See details above.", flush=True)
+
+            if res.get("status") != "ok" and "report" in res:
+                print("🔄 I encountered an error and attempted a self-repair. See above for details.", flush=True)
+
         except Exception as e:
             complete_action(SESSION, aid, False)
-            print(f"❌ Build error for {plugin}: {type(e).__name__}: {e}")
+            print(f"❌ Build error for {plugin}: {type(e).__name__}: {e}", flush=True)
 
 # ----------------------------- Main loop -----------------------------
 def main():
     global debug_mode
-    print("Executor — chat naturally. Type 'quit' to exit.")
+    print("Executor — at your service. Let’s chat. Type 'quit' to exit.", flush=True)
     client = OpenAIClient()
     docket = Docket(namespace=SESSION)
     directives = load_directives()
@@ -214,28 +221,28 @@ def main():
             continue
 
         if user_text.lower() in {"quit", "exit"}:
-            print("bye")
+            print("Goodbye 👋", flush=True)
             return
 
         # Debug commands
         if user_text.lower() == "debug_on":
             debug_mode = True
-            print("🔧 Debug mode enabled.")
+            print("🔧 Debug mode enabled.", flush=True)
             continue
         if user_text.lower() == "debug_off":
             debug_mode = False
-            print("🔧 Debug mode disabled.")
+            print("🔧 Debug mode disabled.", flush=True)
             continue
         if user_text.lower() == "show_actions":
             acts = load_actions(SESSION)
             if acts:
-                print(json.dumps(acts, indent=2))
+                print(json.dumps(acts, indent=2), flush=True)
             else:
-                print("No actions queued.")
+                print("No actions queued.", flush=True)
             continue
         if user_text.lower() == "clear_actions":
             clear_actions(SESSION)
-            print("All pending actions cleared.")
+            print("All pending actions cleared.", flush=True)
             continue
 
         # simple “build now” intents
@@ -243,19 +250,19 @@ def main():
             a = mark_last_action_ready(SESSION)
             if a:
                 if not debug_mode:
-                    print(f"👌 Understood. Building {a['plugin']}…")
+                    print(f"👌 Understood. Building {a['plugin']}…", flush=True)
                 else:
-                    print(f"[Butler] Marked action ready: extend {a['plugin']}: {a['goal']}. Executing…")
+                    print(f"[Butler] Marked action ready: extend {a['plugin']}: {a['goal']}. Executing…", flush=True)
                 _execute_ready_actions(docket)
             else:
-                print("I don’t have a pending action to build yet.")
+                print("I don’t have a pending action to build yet.", flush=True)
             continue
 
         # pending question reminder
         if not reminded:
             pqs = [q for q in load_pending_q(SESSION) if q["status"] == "pending"]
             if pqs:
-                print(f"I have {len(pqs)} pending question(s) for you. You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
+                print(f"I have {len(pqs)} pending question(s) for you. You can 'answer_questions', 'skip_questions', or 'clear_questions'.", flush=True)
             reminded = True
 
         low = user_text.lower()
@@ -263,7 +270,7 @@ def main():
             qs = load_pending_q(SESSION)
             for q in qs:
                 if q["status"] == "pending":
-                    print(f"Q: {q['question']}")
+                    print(f"Q: {q['question']}", flush=True)
                     ans = sys.stdin.readline().strip()
                     if ans:
                         cm.save_fact(SESSION, (directives.get("scope") or "unspecified_fact"), ans.strip(".! "))
@@ -271,11 +278,11 @@ def main():
             save_pending_q(SESSION, qs)
             continue
         if low.startswith("skip_questions") or low in {"not now", "no", "skip"}:
-            print("Understood, I’ll hold the pending questions for later.")
+            print("Understood, I’ll hold the pending questions for later.", flush=True)
             continue
         if low.startswith("clear_questions"):
             save_pending_q(SESSION, [])
-            print("All pending questions cleared.")
+            print("All pending questions cleared.", flush=True)
             continue
 
         # Conversation manager
@@ -291,13 +298,14 @@ def main():
             *history_msgs,
         ]
 
+        print("🤔 Thinking…", flush=True)
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
         data = _parse_json(raw_out)
 
         # Friendly assistant message
         msg = data.get("assistant_message", "")
         if msg:
-            print(msg)
+            print(msg, flush=True)
         cm.record_assistant(SESSION, msg)
 
         # Save facts
@@ -331,7 +339,7 @@ def main():
             if plugin and goal:
                 aid = queue_action(SESSION, plugin, goal, status=status)
                 if debug_mode:
-                    print(f"[Butler] Queued action {aid}: extend {plugin}: {goal} (status={status})")
+                    print(f"[Butler] Queued action {aid}: extend {plugin}: {goal} (status={status})", flush=True)
 
         # fallback inference
         if not actions:
@@ -339,9 +347,9 @@ def main():
             if inferred:
                 aid = queue_action(SESSION, inferred["plugin"], inferred["goal"], status="pending")
                 if debug_mode:
-                    print(f"[Butler] Noted your build request and queued action {aid}: extend {inferred['plugin']}: {inferred['goal']} (status=pending).")
+                    print(f"[Butler] Noted your build request and queued action {aid}: extend {inferred['plugin']}: {inferred['goal']} (status=pending).", flush=True)
                 else:
-                    print(f"Okay, I’ve noted your build request for {inferred['plugin']}. Say 'do it' when ready.")
+                    print(f"Okay, I’ve noted your build request for {inferred['plugin']}. Say 'do it' when ready.", flush=True)
                 continue
 
         if any((a.get("status") or "").lower() == "ready" for a in actions):
