@@ -23,7 +23,7 @@ def _path(session: str, suffix: str) -> str:
     return os.path.join(_MEM_DIR, f"{session}_{suffix}.json")
 
 SESSION = "repl"
-debug_mode = False  # toggled by debug_on/debug_off
+debug_mode = False  # toggled with debug_on/debug_off
 
 def _read_json(path: str, default):
     try:
@@ -63,7 +63,7 @@ def queue_action(session: str, plugin: str, goal: str, status: str = "pending") 
     norm_goal = (goal or "").strip()
     for a in acts:
         if a["plugin"].strip().lower() == norm_plugin and a["goal"].strip() == norm_goal and a["status"] in {"pending","ready","running"}:
-            return a["id"]  # already queued
+            return a["id"]
     aid = str(len(acts)+1)
     acts.append({"id": aid, "plugin": norm_plugin, "goal": norm_goal, "status": status, "queued_ts": _ts()})
     save_actions(session, acts)
@@ -101,7 +101,7 @@ def clear_actions(session: str) -> None:
 
 # ----------------------------- Directives -----------------------------
 _DEFAULT_DIRECTIVES = {
-    "interaction_style": "creative-partner",  # default style
+    "interaction_style": "creative-partner",
     "clarification_mode": "one-at-a-time",
     "autonomous_mode": False,
     "standby_minutes": 15,
@@ -147,6 +147,21 @@ def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
         plugin = m.group(1).lower().replace("-", "_")
     goal = text.strip()
     return {"plugin": plugin, "goal": goal, "status": "pending"}
+
+# ----------------------------- Turn role conversion -----------------------------
+def _convert_turns_for_openai(turns: list[dict]) -> list[dict]:
+    """
+    Convert conversation manager turns into OpenAI-safe roles.
+    - user_fact → system with [FACT] prefix
+    """
+    out = []
+    for t in turns:
+        role = t.get("role")
+        if role == "user_fact":
+            out.append({"role": "system", "content": f"[FACT] {t['content']}"})
+        elif role in {"user", "assistant", "system"}:
+            out.append({"role": role, "content": t.get("content", "")})
+    return out
 
 # ----------------------------- Action execution -----------------------------
 def _execute_ready_actions(docket: Docket) -> None:
@@ -232,14 +247,13 @@ def main():
                 print("I don’t have a pending action to build yet.")
             continue
 
-        # pending question reminder on first input
+        # pending question reminder
         if not reminded:
             pqs = [q for q in load_pending_q(SESSION) if q["status"] == "pending"]
             if pqs:
                 print(f"I have {len(pqs)} pending question(s) for you. You can 'answer_questions', 'skip_questions', or 'clear_questions'.")
             reminded = True
 
-        # pending question commands
         low = user_text.lower()
         if low.startswith("answer_questions"):
             qs = load_pending_q(SESSION)
@@ -260,9 +274,9 @@ def main():
             print("All pending questions cleared.")
             continue
 
-        # Unified conversation manager
+        # Conversation manager
         cm_result = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
-        history_msgs = cm_result.get("messages", [])
+        history_msgs = _convert_turns_for_openai(cm_result.get("messages", []))
         facts = cm.load_facts(SESSION)
 
         msgs = [
@@ -276,7 +290,7 @@ def main():
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
         data = _parse_json(raw_out)
 
-        # friendly assistant message
+        # Show friendly assistant message
         msg = data.get("assistant_message", "")
         if msg:
             print(msg)
