@@ -146,6 +146,22 @@ def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     goal = text.strip()
     return {"plugin": plugin, "goal": goal, "status": "pending"}
 
+# ----------------------------- Conversation history role fix -----------------------------
+def _convert_turns_for_openai(turns: list[dict]) -> list[dict]:
+    """
+    Ensure all roles are valid for OpenAI API.
+    Map 'user_fact' -> 'system' with [FACT] prefix.
+    """
+    out = []
+    for t in turns:
+        role = t.get("role")
+        if role == "user_fact":
+            out.append({"role": "system", "content": f"[FACT] {t['content']}"})
+        elif role in {"user", "assistant", "system"}:
+            out.append({"role": role, "content": t.get("content", "")})
+        # skip unknown roles
+    return out
+
 # ----------------------------- Action execution -----------------------------
 def _execute_ready_actions(docket: Docket) -> None:
     from executor.plugins.repo_analyzer import repo_analyzer
@@ -161,10 +177,8 @@ def _execute_ready_actions(docket: Docket) -> None:
                 res = extend_plugin(plugin, goal)
             except Exception as e:
                 if "plugin_not_found" in str(e):
-                    # Scaffold plugin first
                     print(f"[Butler] Plugin '{plugin}' not found. Scaffolding with builder…")
                     builder.main(plugin_name=plugin, description=f"Auto-generated for goal: {goal}")
-                    # Immediately extend with goal so it’s functional
                     res = extend_plugin(plugin, goal)
                 else:
                     raise
@@ -235,7 +249,7 @@ def main():
             continue
 
         cm_result = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
-        history_msgs = cm_result.get("messages", [])
+        history_msgs = _convert_turns_for_openai(cm_result.get("messages", []))
         facts = cm.load_facts(SESSION)
 
         msgs = [
