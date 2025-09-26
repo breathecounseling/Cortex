@@ -1,15 +1,15 @@
 # executor/plugins/builder/extend_plugin.py
 from __future__ import annotations
-import json
-import os
+import json, os, re
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 from executor.utils.plugin_resolver import resolve as resolve_plugin, PluginNotFound
 from executor.connectors.openai_client import OpenAIClient
 from executor.utils.error_handler import classify_error, ExecutorError
 from executor.utils.patcher_utils import run_tests, WorkingDir
 from executor.utils.self_repair import apply_file_edits
+from executor.plugins.repo_analyzer import repo_analyzer
 
 @dataclass
 class FileEdit:
@@ -17,7 +17,7 @@ class FileEdit:
     content: str
     kind: str  # "code" | "test" | "doc"
 
-# ---------------- Utilities ----------------
+# ---------------- JSON helpers ----------------
 
 def _parse_json_str(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
@@ -28,11 +28,9 @@ def _parse_json_str(s: str) -> Dict[str, Any]:
     except json.JSONDecodeError:
         import re
         m = re.search(r"```json\s*(.*?)\s*```", s, re.DOTALL)
-        if m:
-            return json.loads(m.group(1))
+        if m: return json.loads(m.group(1))
         b, e = s.find("{"), s.rfind("}")
-        if b != -1 and e != -1 and e > b:
-            return json.loads(s[b:e+1])
+        if b != -1 and e != -1 and e > b: return json.loads(s[b:e+1])
         raise ExecutorError("malformed_response", details={"sample": s[:200]})
 
 def _update_manifest(spec, goal: str) -> None:
@@ -52,12 +50,14 @@ def _update_manifest(spec, goal: str) -> None:
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+# ---------------- File materialization ----------------
+
 def _materialize_files(spec, data: Dict[str, Any]) -> List[FileEdit]:
     files = []
     for f in data.get("files", []):
-        if not isinstance(f, dict):
-            continue
-        path = f.get("path"); content = f.get("content"); kind = f.get("kind", "code")
+        if not isinstance(f, dict): continue
+        path, content = f.get("path"), f.get("content")
+        kind = f.get("kind", "code")
         if path and content and str(content).strip():
             if not path.startswith("executor/") and not path.startswith("tests/"):
                 if kind == "test" or os.path.basename(path).startswith("test_"):
@@ -67,75 +67,65 @@ def _materialize_files(spec, data: Dict[str, Any]) -> List[FileEdit]:
             files.append(FileEdit(path=path, content=content, kind=kind))
     return files
 
-# ---------------- Guardrails ----------------
+# ---------------- Model calls ----------------
 
-def _is_trivial_code(content: str) -> bool:
-    c = content or ""
-    return ("def placeholder(" in c) or ("return 'stub'" in c) or ('return "stub"' in c)
-
-def _is_trivial_test(content: str) -> bool:
-    c = (content or "").replace(" ", "")
-    return "placeholder()==" in c and ("=='stub'" in c or '==\"stub\"' in c)
-
-def _require_nontrivial(files: List[FileEdit]) -> Tuple[bool, str]:
-    if not files:
-        return False, "no_files"
-    for f in files:
-        if f.kind == "code" and _is_trivial_code(f.content):
-            return False, "trivial_code"
-        if f.kind == "test" and _is_trivial_test(f.content):
-            return False, "trivial_test"
-    return True, "ok"
-
-# ---------------- Model Calls ----------------
-
-def _call_model_for_edits(client: OpenAIClient, spec, goal: str, *, strict: bool) -> Dict[str, Any]:
-    base = (
+def _call_model_for_goal(client: OpenAIClient, spec, goal: str, repo_map: Dict[str, Any]) -> Dict[str, Any]:
+    system = (
         "You are extending a modular Python plugin.\n"
-        "Preserve backward compatibility unless the goal requires changes.\n"
+        "Preserve backward compatibility unless required.\n"
         "Generate minimal edits with tests.\n"
         "Respond ONLY with JSON: { rationale, changelog, files:[{path,content,kind}] }.\n"
     )
-    strict_add = (
-        "\nRequirements:\n"
-        "- Remove any placeholder or stub code.\n"
-        "- Implement real functionality.\n"
-        "- Provide meaningful tests, not trivial ones.\n"
-        "- If unclear, first write failing tests for expected behavior, then implement code.\n"
-    )
-    system = base + (strict_add if strict else "")
     prompt = (
         f"Goal: {goal}\n"
         f"Primary plugin file: {spec.file_path}\n"
-        f"Tests directory: {spec.tests_dir}\n"
+        f"Tests dir: {spec.tests_dir}\n\n"
+        f"Repo map:\n{json.dumps(repo_map, indent=2)}\n"
     )
     raw = client.generate_structured(system=system, user=prompt, attachments=[spec.file_path])
     return _parse_json_str(raw)
 
-def _call_model_for_repair(client: OpenAIClient, broken_file: FileEdit, traceback: str) -> Dict[str, Any]:
+def _call_model_for_repair(client: OpenAIClient, report: str, suspect_files: List[str], proposal: str, repo_map: Dict[str, Any]) -> Dict[str, Any]:
     system = (
-        "You are repairing a broken Python plugin file.\n"
-        "You will be given the file content and a pytest traceback.\n"
+        "You are repairing a broken Python project.\n"
+        "You will be given pytest errors, a repair proposal, a repo map, and one or more suspect files.\n"
         "Respond ONLY with JSON: { rationale, changelog, files:[{path,content,kind}] }.\n"
-        "- Fix syntax errors or runtime errors.\n"
-        "- Do not introduce placeholders.\n"
-        "- Ensure the file is valid Python.\n"
+        "- Fix the errors without breaking other code.\n"
+        "- Do not reintroduce placeholders.\n"
+        "- Keep changes minimal and targeted.\n"
     )
-    user = (
-        f"Traceback:\n{traceback}\n\n"
-        f"File needing repair: {broken_file.path}\n"
-        f"---\n{broken_file.content}\n---\n"
-    )
-    raw = client.generate_structured(system=system, user=user, attachments=[broken_file.path])
+    user = f"Pytest report:\n{report}\n\nRepair proposal:\n{proposal}\n\nRepo map:\n{json.dumps(repo_map, indent=2)}\n"
+    for path in suspect_files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                code = f.read()
+            user += f"<FILE path='{path}'>\n{code}\n</FILE>\n"
+        except Exception:
+            continue
+    raw = client.generate_structured(system=system, user=user, attachments=suspect_files)
     return _parse_json_str(raw)
 
-# ---------------- Apply + Test ----------------
+# ---------------- Apply & test ----------------
 
-def _apply_and_test(spec, files: List[FileEdit], *, ci: bool) -> Tuple[bool, Dict[str, Any], str]:
+def _apply_and_test(spec, files: List[FileEdit], *, ci: bool) -> tuple[bool, Any]:
     with WorkingDir(ci=ci) as wd:
         apply_file_edits(files, worktree=wd.path)
-        test_result = run_tests(workdir=wd.path, select=[spec.tests_dir])
-        return test_result.success, {"report": test_result.report}, wd.path
+        result = run_tests(workdir=wd.path, select=[spec.tests_dir])
+        if result.success:
+            wd.commit_and_merge(message=f"Extend {spec.name}: apply edits")
+        return result.success, result
+
+# ---------------- Repo-aware error parsing ----------------
+
+def _extract_suspects_from_traceback(report: str) -> List[str]:
+    suspects = []
+    for line in report.splitlines():
+        m = re.search(r'File "(.+?)", line \d+', line)
+        if m:
+            path = m.group(1)
+            if os.path.exists(path):
+                suspects.append(path)
+    return suspects
 
 # ---------------- Main ----------------
 
@@ -146,55 +136,42 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
         raise ExecutorError("plugin_not_found", details={"identifier": plugin_identifier, "why": str(e)})
 
     client = OpenAIClient()
+    repo_map = repo_analyzer.scan_repo()  # always include repo context
 
-    # -------- First pass (normal prompt) --------
-    try:
-        data = _call_model_for_edits(client, spec, user_goal, strict=False)
-    except ExecutorError as e:
-        classification = classify_error(e)
-        return {"status": "model_error", "error": classification.name, "details": classification.details}
+    attempts = 0
+    max_attempts = 3
+    last_report, proposal = None, None
 
-    files = _materialize_files(spec, data)
-    ok_nontrivial, reason = _require_nontrivial(files)
-    if not ok_nontrivial:
-        # Second pass with strict prompt
-        data = _call_model_for_edits(client, spec, user_goal, strict=True)
+    while attempts < max_attempts:
+        attempts += 1
+        if attempts == 1:
+            data = _call_model_for_goal(client, spec, user_goal, repo_map)
+        else:
+            suspects = []
+            if last_report:
+                suspects = _extract_suspects_from_traceback(last_report)
+            if not suspects:
+                suspects = [spec.file_path]
+            data = _call_model_for_repair(client, last_report, suspects, proposal or "Fix the errors.", repo_map)
+
         files = _materialize_files(spec, data)
+        if not files:
+            return {"status": "model_error", "error": "empty_files"}
 
-    if not files:
-        return {"status": "model_error", "error": "empty_files", "details": {}}
+        success, result = _apply_and_test(spec, files, ci=ci)
+        if success:
+            _update_manifest(spec, user_goal)
+            return {
+                "status": "ok",
+                "files": [f.path for f in files],
+                "changelog": data.get("changelog"),
+                "rationale": data.get("rationale"),
+            }
 
-    # -------- Apply + Test --------
-    success, payload, workdir = _apply_and_test(spec, files, ci=ci)
-    if success:
-        _update_manifest(spec, user_goal)
-        return {
-            "status": "ok",
-            "files": [f.path for f in files],
-            "changelog": data.get("changelog"),
-            "rationale": data.get("rationale"),
-        }
+        # on failure → classify + loop
+        err = ExecutorError("tests_failed", details={"report": result.report})
+        classification = classify_error(err)
+        proposal = classification.repair_proposal
+        last_report = result.report
 
-    # -------- Repair loop --------
-    report = payload["report"]
-    broken = [f for f in files if f.kind == "code"]
-    if broken:
-        try:
-            repair_data = _call_model_for_repair(client, broken[0], report)
-            repair_files = _materialize_files(spec, repair_data)
-            if repair_files:
-                success2, payload2, _ = _apply_and_test(spec, repair_files, ci=ci)
-                if success2:
-                    _update_manifest(spec, user_goal)
-                    return {
-                        "status": "ok",
-                        "files": [f.path for f in repair_files],
-                        "changelog": repair_data.get("changelog"),
-                        "rationale": repair_data.get("rationale"),
-                    }
-                else:
-                    return {"status": "tests_failed", "report": payload2["report"], "proposal": "manual repair needed"}
-        except Exception as e:
-            return {"status": "repair_failed", "error": str(e), "report": report}
-
-    return {"status": "tests_failed", "report": report, "proposal": "manual repair needed"}
+    return {"status": "tests_failed", "report": last_report, "proposal": proposal}
