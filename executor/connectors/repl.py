@@ -58,8 +58,13 @@ def save_actions(session: str, acts: List[Dict[str, Any]]) -> None:
 
 def queue_action(session: str, plugin: str, goal: str, status: str = "pending") -> str:
     acts = load_actions(session)
+    norm_plugin = (plugin or "").strip().lower().replace(" ", "_").replace("-", "_")
+    norm_goal = (goal or "").strip()
+    for a in acts:
+        if a["plugin"].strip().lower() == norm_plugin and a["goal"].strip() == norm_goal and a["status"] in {"pending","ready","running"}:
+            return a["id"]  # already queued
     aid = str(len(acts)+1)
-    acts.append({"id": aid, "plugin": plugin, "goal": goal, "status": status, "queued_ts": _ts()})
+    acts.append({"id": aid, "plugin": norm_plugin, "goal": norm_goal, "status": status, "queued_ts": _ts()})
     save_actions(session, acts)
     return aid
 
