@@ -17,6 +17,8 @@ class FileEdit:
     content: str
     kind: str  # "code" | "test" | "doc"
 
+# ---------------- Utilities ----------------
+
 def _parse_json_str(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
     if not s:
@@ -50,76 +52,6 @@ def _update_manifest(spec, goal: str) -> None:
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
-# ---------------- Guardrails to prevent "green-on-stub" ----------------
-
-def _is_trivial_code(content: str) -> bool:
-    c = content or ""
-    return ("def placeholder(" in c) or ("return 'stub'" in c) or ('return "stub"' in c)
-
-def _is_trivial_test(content: str) -> bool:
-    c = (content or "").replace(" ", "")
-    # patterns like: assert plugin.placeholder()=='stub'
-    return "placeholder()==" in c and ("=='stub'" in c or '=="stub"' in c)
-
-def _collect_changed_files(files: List[FileEdit]) -> Tuple[List[FileEdit], List[FileEdit]]:
-    code, tests = [], []
-    for f in files:
-        kind = (f.kind or "code").lower()
-        if kind == "test" or os.path.basename(f.path).startswith("test_"):
-            tests.append(f)
-        else:
-            code.append(f)
-    return code, tests
-
-def _require_nontrivial_changes(changed_code_files: List[FileEdit], changed_test_files: List[FileEdit]) -> Tuple[bool, str]:
-    """
-    Inspect the model-proposed edits. If they still look like placeholders or trivial tests,
-    ask the caller to retry with a stricter prompt.
-    """
-    # If no code files were changed, that's suspicious for a build/extend goal
-    if not changed_code_files:
-        return False, "no_code_changes"
-
-    # If any changed code still contains placeholders, reject
-    for f in changed_code_files:
-        if _is_trivial_code(f.content):
-            return False, f"trivial_code:{os.path.basename(f.path)}"
-
-    # If tests exist but remain trivial, reject
-    for f in changed_test_files:
-        if _is_trivial_test(f.content):
-            return False, f"trivial_test:{os.path.basename(f.path)}"
-
-    return True, "ok"
-
-# ---------------- Core extend flow ----------------
-
-def _call_model_for_edits(client: OpenAIClient, spec, user_goal: str, *, strict: bool) -> Dict[str, Any]:
-    base_system = (
-        "You are extending a modular Python plugin.\n"
-        "Preserve backward compatibility unless the goal requires changes.\n"
-        "Generate minimal edits with tests.\n"
-        "Respond ONLY with JSON: { rationale, changelog, files:[{path,content,kind}] }.\n"
-    )
-    strict_addendum = (
-        "\nHARD REQUIREMENTS:\n"
-        "- Replace any 'placeholder' or 'return \"stub\"' code with real implementations.\n"
-        "- Include at least one meaningful test that validates real behavior (NOT placeholder assertions).\n"
-        "- If behavior is ambiguous, first write failing tests that encode the expected behavior from the goal; "
-        "then implement code so those tests pass.\n"
-        "- Do not output trivial tests like `assert plugin.placeholder() == 'stub'`.\n"
-        "- Ensure paths are within the plugin or its tests directory.\n"
-    )
-    system = base_system + (strict_addendum if strict else "")
-    prompt = (
-        f"Goal: {user_goal}\n"
-        f"Primary plugin file: {spec.file_path}\n"
-        f"Tests directory: {spec.tests_dir}\n"
-        "Return only JSON.\n"
-    )
-    raw = client.generate_structured(system=system, user=prompt, attachments=[spec.file_path])
-    return _parse_json_str(raw)
-
 def _materialize_files(spec, data: Dict[str, Any]) -> List[FileEdit]:
     files = []
     for f in data.get("files", []):
@@ -127,7 +59,6 @@ def _materialize_files(spec, data: Dict[str, Any]) -> List[FileEdit]:
             continue
         path = f.get("path"); content = f.get("content"); kind = f.get("kind", "code")
         if path and content and str(content).strip():
-            # Normalize destination: keep writes inside plugin dir or its tests dir
             if not path.startswith("executor/") and not path.startswith("tests/"):
                 if kind == "test" or os.path.basename(path).startswith("test_"):
                     path = os.path.join(spec.tests_dir, os.path.basename(path))
@@ -136,16 +67,77 @@ def _materialize_files(spec, data: Dict[str, Any]) -> List[FileEdit]:
             files.append(FileEdit(path=path, content=content, kind=kind))
     return files
 
-def _apply_and_test(spec, files: List[FileEdit], *, ci: bool) -> Tuple[bool, Dict[str, Any]]:
+# ---------------- Guardrails ----------------
+
+def _is_trivial_code(content: str) -> bool:
+    c = content or ""
+    return ("def placeholder(" in c) or ("return 'stub'" in c) or ('return "stub"' in c)
+
+def _is_trivial_test(content: str) -> bool:
+    c = (content or "").replace(" ", "")
+    return "placeholder()==" in c and ("=='stub'" in c or '==\"stub\"' in c)
+
+def _require_nontrivial(files: List[FileEdit]) -> Tuple[bool, str]:
+    if not files:
+        return False, "no_files"
+    for f in files:
+        if f.kind == "code" and _is_trivial_code(f.content):
+            return False, "trivial_code"
+        if f.kind == "test" and _is_trivial_test(f.content):
+            return False, "trivial_test"
+    return True, "ok"
+
+# ---------------- Model Calls ----------------
+
+def _call_model_for_edits(client: OpenAIClient, spec, goal: str, *, strict: bool) -> Dict[str, Any]:
+    base = (
+        "You are extending a modular Python plugin.\n"
+        "Preserve backward compatibility unless the goal requires changes.\n"
+        "Generate minimal edits with tests.\n"
+        "Respond ONLY with JSON: { rationale, changelog, files:[{path,content,kind}] }.\n"
+    )
+    strict_add = (
+        "\nRequirements:\n"
+        "- Remove any placeholder or stub code.\n"
+        "- Implement real functionality.\n"
+        "- Provide meaningful tests, not trivial ones.\n"
+        "- If unclear, first write failing tests for expected behavior, then implement code.\n"
+    )
+    system = base + (strict_add if strict else "")
+    prompt = (
+        f"Goal: {goal}\n"
+        f"Primary plugin file: {spec.file_path}\n"
+        f"Tests directory: {spec.tests_dir}\n"
+    )
+    raw = client.generate_structured(system=system, user=prompt, attachments=[spec.file_path])
+    return _parse_json_str(raw)
+
+def _call_model_for_repair(client: OpenAIClient, broken_file: FileEdit, traceback: str) -> Dict[str, Any]:
+    system = (
+        "You are repairing a broken Python plugin file.\n"
+        "You will be given the file content and a pytest traceback.\n"
+        "Respond ONLY with JSON: { rationale, changelog, files:[{path,content,kind}] }.\n"
+        "- Fix syntax errors or runtime errors.\n"
+        "- Do not introduce placeholders.\n"
+        "- Ensure the file is valid Python.\n"
+    )
+    user = (
+        f"Traceback:\n{traceback}\n\n"
+        f"File needing repair: {broken_file.path}\n"
+        f"---\n{broken_file.content}\n---\n"
+    )
+    raw = client.generate_structured(system=system, user=user, attachments=[broken_file.path])
+    return _parse_json_str(raw)
+
+# ---------------- Apply + Test ----------------
+
+def _apply_and_test(spec, files: List[FileEdit], *, ci: bool) -> Tuple[bool, Dict[str, Any], str]:
     with WorkingDir(ci=ci) as wd:
         apply_file_edits(files, worktree=wd.path)
         test_result = run_tests(workdir=wd.path, select=[spec.tests_dir])
-        if not test_result.success:
-            err = ExecutorError("tests_failed", details={"report": test_result.report})
-            classification = classify_error(err)
-            return False, {"status": "tests_failed", "report": test_result.report, "proposal": classification.repair_proposal}
-        wd.commit_and_merge(message=f"Extend {spec.name}: apply edits")
-        return True, {}
+        return test_result.success, {"report": test_result.report}, wd.path
+
+# ---------------- Main ----------------
 
 def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -> Dict[str, Any]:
     try:
@@ -155,7 +147,7 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
 
     client = OpenAIClient()
 
-    # ---------- First pass (normal prompt) ----------
+    # -------- First pass (normal prompt) --------
     try:
         data = _call_model_for_edits(client, spec, user_goal, strict=False)
     except ExecutorError as e:
@@ -163,38 +155,46 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
         return {"status": "model_error", "error": classification.name, "details": classification.details}
 
     files = _materialize_files(spec, data)
-    if not files:
-        return {"status": "model_error", "error": "empty_files", "details": {"raw": "no files in model output"}}
-
-    code_files, test_files = _collect_changed_files(files)
-    ok_nontrivial, reason = _require_nontrivial_changes(code_files, test_files)
+    ok_nontrivial, reason = _require_nontrivial(files)
     if not ok_nontrivial:
-        # ---------- Second pass (strict prompt) ----------
-        data2 = _call_model_for_edits(client, spec, user_goal, strict=True)
-        files2 = _materialize_files(spec, data2)
-        if not files2:
-            return {"status": "model_error", "error": "empty_files_after_strict", "details": {"raw": "no files in strict output"}}
-        code2, test2 = _collect_changed_files(files2)
-        ok_nontrivial2, reason2 = _require_nontrivial_changes(code2, test2)
-        if not ok_nontrivial2:
-            return {
-                "status": "tests_failed",
-                "report": f"Edits remained trivial ({reason2}). Replace placeholders and write meaningful tests.",
-                "proposal": "Regenerate implementation and tests without placeholder patterns."
-            }
-        files = files2
-        data = data2
+        # Second pass with strict prompt
+        data = _call_model_for_edits(client, spec, user_goal, strict=True)
+        files = _materialize_files(spec, data)
 
-    # Apply files and run tests
-    success, test_payload = _apply_and_test(spec, files, ci=ci)
-    if not success:
-        return test_payload
+    if not files:
+        return {"status": "model_error", "error": "empty_files", "details": {}}
 
-    # Update manifest on success
-    _update_manifest(spec, user_goal)
-    return {
-        "status": "ok",
-        "files": [e.path for e in files],
-        "changelog": data.get("changelog"),
-        "rationale": data.get("rationale"),
-    }
+    # -------- Apply + Test --------
+    success, payload, workdir = _apply_and_test(spec, files, ci=ci)
+    if success:
+        _update_manifest(spec, user_goal)
+        return {
+            "status": "ok",
+            "files": [f.path for f in files],
+            "changelog": data.get("changelog"),
+            "rationale": data.get("rationale"),
+        }
+
+    # -------- Repair loop --------
+    report = payload["report"]
+    broken = [f for f in files if f.kind == "code"]
+    if broken:
+        try:
+            repair_data = _call_model_for_repair(client, broken[0], report)
+            repair_files = _materialize_files(spec, repair_data)
+            if repair_files:
+                success2, payload2, _ = _apply_and_test(spec, repair_files, ci=ci)
+                if success2:
+                    _update_manifest(spec, user_goal)
+                    return {
+                        "status": "ok",
+                        "files": [f.path for f in repair_files],
+                        "changelog": repair_data.get("changelog"),
+                        "rationale": repair_data.get("rationale"),
+                    }
+                else:
+                    return {"status": "tests_failed", "report": payload2["report"], "proposal": "manual repair needed"}
+        except Exception as e:
+            return {"status": "repair_failed", "error": str(e), "report": report}
+
+    return {"status": "tests_failed", "report": report, "proposal": "manual repair needed"}
