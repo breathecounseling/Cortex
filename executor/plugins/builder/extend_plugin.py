@@ -1,4 +1,3 @@
-# executor/plugins/builder/extend_plugin.py
 from __future__ import annotations
 import json, os, re
 from dataclasses import dataclass
@@ -30,6 +29,16 @@ def _normalize_repo_map(repo_map: Dict[str, Any]) -> Dict[str, Any]:
             return [convert(x) for x in obj]
         return obj
     return convert(repo_map)
+
+def _trim_repo_map(repo_map: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a lighter-weight repo map with only plugin names + descriptions + capabilities."""
+    trimmed = {}
+    for plugin, meta in repo_map.items():
+        trimmed[plugin] = {
+            "description": meta.get("description", ""),
+            "capabilities": list(meta.get("capabilities", [])),
+        }
+    return trimmed
 
 def _parse_json_str(s: str) -> Dict[str, Any]:
     s = (s or "").strip()
@@ -145,7 +154,8 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
         raise ExecutorError("plugin_not_found", details={"identifier": plugin_identifier, "why": str(e)})
 
     client = OpenAIClient()
-    repo_map = _normalize_repo_map(repo_analyzer.scan_repo())
+    repo_map_full = _normalize_repo_map(repo_analyzer.scan_repo())
+    repo_map_trim = _trim_repo_map(repo_map_full)
 
     attempts = 0
     max_attempts = 3
@@ -155,14 +165,16 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
         attempts += 1
         try:
             if attempts == 1:
-                data = _call_model_for_goal(client, spec, user_goal, repo_map)
+                # First pass: light repo map
+                data = _call_model_for_goal(client, spec, user_goal, repo_map_trim)
             else:
                 suspects = []
                 if last_report:
                     suspects = _extract_suspects_from_traceback(last_report)
                 if not suspects:
                     suspects = [spec.file_path]
-                data = _call_model_for_repair(client, last_report, suspects, proposal or "Fix the errors.", repo_map)
+                # Repair uses full repo map
+                data = _call_model_for_repair(client, last_report, suspects, proposal or "Fix the errors.", repo_map_full)
 
             files = _materialize_files(spec, data)
             if not files:
@@ -190,6 +202,8 @@ def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False) -
             classification = classify_error(e if isinstance(e, ExecutorError) else ExecutorError("runtime_error", details={"report": str(e)}))
             proposal = getattr(classification, "repair_proposal", "Fix the errors.")
             last_report = report
-            # loop continues until max_attempts
+
+        # friendly progress print
+        print(f"🔄 Attempting repair pass {attempts}/{max_attempts}…", flush=True)
 
     return {"status": "failed", "report": last_report, "proposal": proposal}
