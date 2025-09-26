@@ -1,15 +1,33 @@
-# executor/plugins/builder/builder.py
 from __future__ import annotations
 import os
 import json
+
+TEMPLATE_DIR = os.path.join("executor", "templates")
+
+
+def _load_template(name: str) -> str:
+    """Load a template file from executor/templates."""
+    path = os.path.join(TEMPLATE_DIR, name)
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _render_template(template: str, **kwargs) -> str:
+    """Simple Jinja-style replacement {{ key }} → value."""
+    out = template
+    for k, v in kwargs.items():
+        out = out.replace(f"{{{{ {k} }}}}", v)
+    return out
+
 
 def main(plugin_name: str, description: str = "") -> None:
     """
     Scaffold a new plugin under executor/plugins/<plugin_name>/ with:
       - __init__.py
       - <plugin_name>.py (stub)
+      - specialist.py (from template)
       - test_<plugin_name>.py (stub test)
-      - plugin.json (manifest with description + capabilities)
+      - plugin.json (manifest with description + capabilities + specialist path)
     """
     base = os.path.join("executor", "plugins", plugin_name)
     os.makedirs(base, exist_ok=True)
@@ -27,6 +45,14 @@ def main(plugin_name: str, description: str = "") -> None:
             f.write("def placeholder():\n")
             f.write("    return 'stub'\n")
 
+    # specialist file (from template)
+    specialist_file = os.path.join(base, "specialist.py")
+    if not os.path.exists(specialist_file):
+        template = _load_template("specialist.py.j2")
+        content = _render_template(template, plugin_name=plugin_name)
+        with open(specialist_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
     # test file
     test_file = os.path.join(base, f"test_{plugin_name}.py")
     if not os.path.exists(test_file):
@@ -39,7 +65,8 @@ def main(plugin_name: str, description: str = "") -> None:
     manifest = {
         "name": plugin_name,
         "description": description or f"Plugin {plugin_name}",
-        "capabilities": []
+        "capabilities": [],
+        "specialist": f"executor.plugins.{plugin_name}.specialist",
     }
     manifest_file = os.path.join(base, "plugin.json")
     if not os.path.exists(manifest_file):
