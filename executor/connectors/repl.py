@@ -150,10 +150,6 @@ def _infer_action_from_text(text: str) -> Optional[Dict[str, Any]]:
 
 # ----------------------------- Turn role conversion -----------------------------
 def _convert_turns_for_openai(turns: list[dict]) -> list[dict]:
-    """
-    Convert conversation manager turns into OpenAI-safe roles.
-    - user_fact → system with [FACT] prefix
-    """
     out = []
     for t in turns:
         role = t.get("role")
@@ -290,7 +286,7 @@ def main():
         raw_out = client.chat(msgs, response_format={"type": "json_object"})
         data = _parse_json(raw_out)
 
-        # Show friendly assistant message
+        # Friendly assistant message
         msg = data.get("assistant_message", "")
         if msg:
             print(msg)
@@ -310,12 +306,20 @@ def main():
             if isinstance(t, dict) and t.get("title"):
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
-        # Queue actions
+        # Queue actions (robust handling: dict or string)
         actions = data.get("actions") or []
         for a in actions:
-            plugin = (a.get("plugin") or "").strip()
-            goal = (a.get("goal") or "").strip()
-            status = (a.get("status") or "pending").strip().lower()
+            if isinstance(a, dict):
+                plugin = (a.get("plugin") or "").strip()
+                goal = (a.get("goal") or "").strip()
+                status = (a.get("status") or "pending").strip().lower()
+            elif isinstance(a, str):
+                plugin = "repl"
+                goal = a.strip()
+                status = "pending"
+            else:
+                continue
+
             if plugin and goal:
                 aid = queue_action(SESSION, plugin, goal, status=status)
                 if debug_mode:
