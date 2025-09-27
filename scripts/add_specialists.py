@@ -19,19 +19,32 @@ def main():
         try:
             with open(manifest_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except Exception as e:
-            print(f"[add_specialists] Could not read {manifest_file}: {e}")
+        except Exception:
             continue
 
         expected = f"executor.plugins.{entry}.specialist"
+        updated = False
+
         if data.get("specialist") != expected:
             data["specialist"] = expected
+            updated = True
+
+        specialist_file = os.path.join(plugin_dir, "specialist.py")
+        if not os.path.exists(specialist_file):
             try:
-                with open(manifest_file, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                print(f"✅ Updated manifest for {entry}")
+                tmpl_path = os.path.join("executor", "templates", "specialist.py.j2")
+                with open(tmpl_path, "r", encoding="utf-8") as tf:
+                    tmpl = tf.read()
+                with open(specialist_file, "w", encoding="utf-8") as sf:
+                    sf.write(tmpl.replace("{{ plugin_name }}", entry))
+                updated = True
             except Exception as e:
-                print(f"[add_specialists] Could not write {manifest_file}: {e}")
+                print(f"[add_specialists] Could not create specialist for {entry}: {e}")
+
+        if updated:
+            with open(manifest_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            print(f"✅ Updated {entry}")
 
 if __name__ == "__main__":
     main()
