@@ -296,11 +296,15 @@ Summarizes logs into a compact profile (JSON) injected into Router context.
 
 
 
-3. ML Layer (Later)
+3. ML Layer (Later) Introduce specialized ML models to deepen personalization:
 
-Add embeddings + clustering to detect higher-level patterns.
+Embeddings for representation: Use OpenAI embeddings or sentence-transformers to turn logs into vectors for similarity search.
 
-Outputs compact preference models for GPT to use.
+Clustering / Topic Models: Group behaviors into themes (finance, fitness, UI) using KMeans, HDBSCAN, or BERTopic.
+
+Sequence Models: Capture temporal patterns in your interactions (simple RNNs, Transformers, or even n-gram models).
+
+Preference Modeling: Reinforcement-style or Bayesian updating to track likes/dislikes and tendencies over time.
 
 
 
