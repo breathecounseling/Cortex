@@ -1,10 +1,10 @@
-# executor/plugins/repo_analyzer/repo_analyzer.py
 import os, json, re
-from typing import Dict, Any, Set
+from typing import Dict, Any
 
 def scan_repo(base: str = "executor/plugins") -> Dict[str, Dict[str, Any]]:
     idx: Dict[str, Dict[str, Any]] = {}
     if not os.path.isdir(base):
+        # Defensive: in test environments executor/plugins may not exist
         return idx
     for entry in os.listdir(base):
         pdir = os.path.join(base, entry)
