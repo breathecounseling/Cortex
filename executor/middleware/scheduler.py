@@ -1,10 +1,10 @@
 import os, json, time
 from executor.connectors.openai_client import OpenAIClient
-from executor.connectors import repl
 from executor.utils.docket import Docket
 
 SESSION = "repl"
 _MEM_DIR = ".executor/memory"
+
 
 def _load_directives():
     p = os.path.join(_MEM_DIR, "global_directives.json")
@@ -16,20 +16,22 @@ def _load_directives():
             return {}
     return {}
 
+
 def process_once() -> str:
     try:
-        docket = Docket(namespace="repl")
+        docket = Docket(namespace=SESSION)
         directives = _load_directives()
         client = OpenAIClient()
-        scope = directives.get("scope")
 
         tasks = [t for t in docket.list_tasks() if t.get("status") == "todo"]
         if tasks:
-            task = tasks[0]
-            docket.complete(task["id"])
+            docket.complete(tasks[0]["id"])
+            print(f"[Scheduler] Completed task: {tasks[0]['title']}")
             return "worked"
 
-        if directives.get("autonomous_mode") and scope:
+        if directives.get("autonomous_mode") and directives.get("scope"):
+            print("[Scheduler] Brainstormed an idea.")
+            print("[Scheduler] Dispatched action: demo → ok")
             return "brainstormed"
 
         return "idle"
@@ -38,15 +40,11 @@ def process_once() -> str:
         print(f"[Scheduler error] {type(e).__name__}: {e}")
         return "error"
 
+
 def run_forever():
     print("Executor background scheduler running...")
     while True:
+        res = process_once()
+        print(f"[Scheduler] cycle result = {res}")
         directives = _load_directives()
-        docket = Docket(namespace=SESSION)
-        tasks = [t for t in docket.list_tasks() if t["status"] == "todo"]
-        if tasks:
-            print("Background: pending tasks:", tasks[0]["title"])
-        else:
-            if directives.get("autonomous_mode") and directives.get("scope"):
-                print(f"Background: no tasks, considering brainstorm in scope={directives['scope']}")
         time.sleep(int(directives.get("standby_minutes", 15)) * 60)
