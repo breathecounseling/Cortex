@@ -40,7 +40,9 @@ def _save_actions(actions: List[Dict[str, Any]]) -> None:
 def _queue_action(plugin: str, goal: str, status: str = "pending") -> str:
     actions = _load_actions()
     aid = str(len(actions) + 1)
-    actions.append({"id": aid, "plugin": plugin, "goal": goal, "status": status, "queued_ts": _ts()})
+    actions.append(
+        {"id": aid, "plugin": plugin, "goal": goal, "status": status, "queued_ts": _ts()}
+    )
     _save_actions(actions)
     return aid
 
@@ -80,29 +82,20 @@ def main():
         # ------------------------------------------------------------
         if user_text.lower().startswith("approve "):
             tid = user_text.split(" ", 1)[1].strip()
-            # best-effort update: prefer Docket.update if available
             try:
-                task = None
-                for t in docket.list_tasks():
-                    if str(t.get("id")) == tid:
-                        task = t
-                        break
+                task = next((t for t in docket.list_tasks() if str(t.get("id")) == tid), None)
                 if task:
                     new_title = _strip_idea_prefix(task["title"])
-                    # Try update(title=..., status="todo"), else fallback to internal patch
+                    # Always update the same task
                     if hasattr(docket, "update"):
                         docket.update(tid, title=new_title, status="todo")
                     else:
-                        # fallback: mark complete=false by rewriting underlying list
-                        tasks = docket.list_tasks()
-                        for t in tasks:
-                            if str(t.get("id")) == tid:
-                                t["title"] = new_title
-                                t["status"] = "todo"
-                        # Docket lacks a public save? Best-effort: re-add a mirror task
-                        # so tests see a 'todo' whose title doesn't start with [idea]
-                        docket.add(new_title, priority=task.get("priority", "normal"))
-                    print("The task has been approved and is now ready to be progressed.")
+                        # Fallback: mark task manually
+                        task["title"] = new_title
+                        task["status"] = "todo"
+                    print(
+                        "The task has been approved and is now ready to be progressed."
+                    )
                 else:
                     print("I couldn't find that task ID.")
             except Exception:
@@ -115,7 +108,6 @@ def main():
                 if hasattr(docket, "update"):
                     docket.update(tid, status="rejected")
                 else:
-                    # best-effort: mark done so it no longer appears as todo
                     docket.complete(tid)
                 print("The task has been rejected.")
             except Exception:
@@ -129,7 +121,10 @@ def main():
         facts = cm.load_facts(SESSION)
 
         msgs = [
-            {"role": "system", "content": "You are the Butler. Always return a JSON object (assistant_message, actions, tasks_to_add, facts_to_save). Include the word 'json' somewhere in your messages context."},  # ensure json word present for response_format
+            {
+                "role": "system",
+                "content": "You are the Butler. Always return a JSON object (assistant_message, actions, tasks_to_add, facts_to_save). Include the word 'json' somewhere in your messages context.",
+            },
             {"role": "system", "content": f"Facts: {json.dumps(facts)}"},
         ] + cm_ctx["messages"]
 
@@ -138,7 +133,12 @@ def main():
         try:
             data = json.loads(raw_out)
         except Exception:
-            data = {"assistant_message": "stubbed", "actions": [], "tasks_to_add": [], "facts_to_save": []}
+            data = {
+                "assistant_message": "stubbed",
+                "actions": [],
+                "tasks_to_add": [],
+                "facts_to_save": [],
+            }
 
         msg = data.get("assistant_message", "")
         if msg:
@@ -159,12 +159,17 @@ def main():
         actions = data.get("actions") or []
         for a in actions:
             if isinstance(a, dict):
-                _queue_action(a.get("plugin", ""), a.get("goal", ""), a.get("status", "pending"))
+                _queue_action(
+                    a.get("plugin", ""), a.get("goal", ""), a.get("status", "pending")
+                )
             elif isinstance(a, str):
                 _queue_action("repl", a, "pending")
 
         # Execute if any ready
-        if any(isinstance(a, dict) and (a.get("status") or "").lower() == "ready" for a in actions):
+        if any(
+            isinstance(a, dict) and (a.get("status") or "").lower() == "ready"
+            for a in actions
+        ):
             _execute_ready_actions()
 
         # Compatibility: write facts file for tests (repl_facts.json)
