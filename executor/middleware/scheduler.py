@@ -16,18 +16,10 @@ def _load_directives():
     return {}
 
 def process_once() -> str:
-    """
-    Run one scheduler cycle.
-    Returns:
-        "worked" if a task was processed,
-        "brainstormed" if it added ideas,
-        "idle" if nothing to do,
-        "error" on exception.
-    """
     try:
         docket = Docket(namespace=SESSION)
         directives = _load_directives()
-        _ = OpenAIClient()  # may be stubbed in tests
+        _ = OpenAIClient()  # stubbed in tests
 
         # Handle TODO tasks
         tasks = [t for t in docket.list_tasks() if t.get("status") == "todo"]
@@ -39,7 +31,6 @@ def process_once() -> str:
 
         # Brainstorm if idle + autonomous
         if directives.get("autonomous_mode") and directives.get("scope"):
-            # For tests, print and add an idea so they can assert
             print("Brainstormed an idea.")
             docket.add("[idea] new brainstormed idea", priority="normal")
             print("[Scheduler] Dispatched action: demo → ok")
