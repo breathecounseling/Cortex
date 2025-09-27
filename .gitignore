@@ -86,3 +86,4 @@ logs/
 *.temp
 *.orig
 *.rej
+.executor/memory/
