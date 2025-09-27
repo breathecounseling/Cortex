@@ -1,12 +1,3 @@
-"""
-Registry for Executor specialists.
-
-- Discovers all plugins under executor/plugins
-- Loads plugin.json for metadata
-- Imports each plugin's specialist if declared
-- Provides lookup helpers for the Router and Dispatcher
-"""
-
 import importlib
 import json
 import os
@@ -26,7 +17,7 @@ class SpecialistRegistry:
         self.plugins.clear()
         self.specialists.clear()
 
-        # Ensure the base directory is importable
+        # Ensure the base of executor is importable
         abs_base = os.path.abspath(os.path.join(self.base, "..", ".."))
         if abs_base not in sys.path:
             sys.path.insert(0, abs_base)
