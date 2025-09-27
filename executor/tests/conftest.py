@@ -1,9 +1,10 @@
-import subprocess
-import sys
-import os
+import pytest
 
-def pytest_sessionstart(session):
-    """Run before the test suite starts — ensures specialists exist."""
-    script = os.path.join("scripts", "add_specialists.py")
-    print("[conftest] Ensuring all plugins have specialists before tests...")
-    subprocess.run([sys.executable, script], check=False)
+# Stub OpenAIClient for all tests unless explicitly overridden
+@pytest.fixture(autouse=True)
+def stub_openai(monkeypatch):
+    class DummyClient:
+        def chat(self, messages, response_format=None):
+            return '{"assistant_message":"stubbed","actions":[],"tasks_to_add":[]}'
+    from executor.connectors import openai_client
+    monkeypatch.setattr(openai_client, "OpenAIClient", lambda: DummyClient())
