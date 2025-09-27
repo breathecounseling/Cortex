@@ -40,7 +40,12 @@ def main(plugin_name: str, description: str = "") -> None:
             json.dump(manifest, f, indent=2)
 
     # specialist.py from template
-    template_path = os.path.join("executor", "templates", "specialist.py.j2")
+    template_path = os.path.join(
+    os.path.dirname(__file__),
+    "..", "..", "templates", "specialist.py.j2"
+)
+template_path = os.path.abspath(template_path)
+
     try:
         with open(template_path, "r", encoding="utf-8") as tf:
             tmpl = tf.read()
