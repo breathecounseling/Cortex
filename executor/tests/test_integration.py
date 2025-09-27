@@ -15,6 +15,7 @@ def test_chat_roundtrip(monkeypatch):
     # Stub the API call
     def fake_chat(messages, response_format=None):
         return "Hello world"
+
     monkeypatch.setattr(client, "chat", fake_chat)
 
     res = client.chat([{"role": "user", "content": "hi"}])
@@ -26,6 +27,7 @@ def tmp_memory(monkeypatch, tmp_path):
     """Patch Executor memory dir to a temporary path for both REPL and Scheduler."""
     memdir = tmp_path / ".executor" / "memory"
     memdir.mkdir(parents=True)
+
     monkeypatch.setattr("executor.connectors.repl._MEM_DIR", str(memdir))
     monkeypatch.setattr("executor.middleware.scheduler._MEM_DIR", str(memdir))
     monkeypatch.chdir(tmp_path)
@@ -48,10 +50,10 @@ def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
     os.chdir(tmp_memory.parent)
     builder.main(plugin_name, "Integration test plugin")
 
-    # Import repl after monkeypatches
+    # Import repl fresh
     repl = importlib.reload(importlib.import_module("executor.connectors.repl"))
 
-    # Stub Router for REPL → ready action (NEW TARGET PATH)
+    # Stub Router for REPL → ready action
     def fake_route_repl(user_text, session="repl", directives=None):
         return {
             "assistant_message": "Got it, I will build this.",
@@ -66,7 +68,7 @@ def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
             ],
         }
 
-    # Updated monkeypatch: router now lives under executor.core.router
+    # ✅ Updated monkeypatch target
     monkeypatch.setattr("executor.core.router.route", fake_route_repl, raising=False)
 
     # Run REPL once with input
@@ -81,7 +83,7 @@ def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
     actions_path = tmp_memory / "repl_actions.json"
     assert actions_path.exists()
 
-    # Verify Docket can list tasks (ensures docket integration still works)
+    # Verify Docket can list tasks
     docket = Docket(namespace="repl")
     assert isinstance(docket.list_tasks(), list)
 
