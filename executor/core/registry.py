@@ -10,6 +10,7 @@ Registry for Executor specialists.
 import importlib
 import json
 import os
+import sys
 from typing import Dict, Any
 
 
@@ -24,6 +25,12 @@ class SpecialistRegistry:
         """Re-scan plugin directories for manifests + specialists."""
         self.plugins.clear()
         self.specialists.clear()
+
+        # Ensure the base directory is importable
+        abs_base = os.path.abspath(os.path.join(self.base, "..", ".."))
+        if abs_base not in sys.path:
+            sys.path.insert(0, abs_base)
+
         for entry in os.listdir(self.base):
             pdir = os.path.join(self.base, entry)
             if not os.path.isdir(pdir):
