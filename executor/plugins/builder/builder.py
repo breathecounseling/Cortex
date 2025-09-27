@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import json
 
+
 def main(plugin_name: str, description: str = "") -> None:
     base = os.path.join("executor", "plugins", plugin_name)
     os.makedirs(base, exist_ok=True)
@@ -39,13 +40,10 @@ def main(plugin_name: str, description: str = "") -> None:
         with open(manifest_file, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
-    # specialist.py from template
-    template_path = os.path.join(
-    os.path.dirname(__file__),
-    "..", "..", "templates", "specialist.py.j2"
-)
-template_path = os.path.abspath(template_path)
-
+    # specialist.py from template (absolute path resolution)
+    template_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "templates", "specialist.py.j2")
+    )
     try:
         with open(template_path, "r", encoding="utf-8") as tf:
             tmpl = tf.read()
