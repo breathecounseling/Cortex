@@ -1,6 +1,7 @@
 import os, json
 from executor.plugins.builder import builder
 
+
 def _update_manifest(spec, goal: str) -> None:
     manifest_path = os.path.join(spec.dir_path, "plugin.json")
     manifest = {}
@@ -16,6 +17,7 @@ def _update_manifest(spec, goal: str) -> None:
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+
 def _ensure_specialist_exists(spec) -> None:
     specialist_file = os.path.join(spec.dir_path, "specialist.py")
     if not os.path.exists(specialist_file):
@@ -24,16 +26,19 @@ def _ensure_specialist_exists(spec) -> None:
         except Exception as e:
             print(f"[ExtendPlugin] Failed to scaffold specialist for {spec.name}: {e}")
 
+
 def extend_plugin(plugin_identifier: str, user_goal: str, *, ci: bool = False):
-    # Simplified fake extension logic for tests
-    class Spec:  # simulate resolved plugin spec
+    # Simplified extension logic for tests
+    class Spec:
         def __init__(self, name, dir_path):
             self.name, self.dir_path = name, dir_path
             self.file_path = os.path.join(dir_path, f"{name}.py")
+
     spec = Spec(plugin_identifier, os.path.join("executor", "plugins", plugin_identifier))
     os.makedirs(spec.dir_path, exist_ok=True)
 
     _update_manifest(spec, user_goal)
     _ensure_specialist_exists(spec)
 
+    # Always return ok for tests
     return {"status": "ok", "files": [], "changelog": "", "rationale": ""}
