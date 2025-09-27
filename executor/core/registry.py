@@ -17,10 +17,10 @@ class SpecialistRegistry:
         self.plugins.clear()
         self.specialists.clear()
 
-        # Ensure the base of executor is importable
-        abs_base = os.path.abspath(os.path.join(self.base, "..", ".."))
-        if abs_base not in sys.path:
-            sys.path.insert(0, abs_base)
+        # Ensure the directory that contains `executor` is importable
+        abs_root = os.path.abspath(os.path.join(self.base, "..", ".."))
+        if abs_root not in sys.path:
+            sys.path.insert(0, abs_root)
 
         for entry in os.listdir(self.base):
             pdir = os.path.join(self.base, entry)
