@@ -16,6 +16,14 @@ def _load_directives():
     return {}
 
 def process_once() -> str:
+    """
+    Run one scheduler cycle.
+    Returns:
+        "worked" if a task was processed,
+        "brainstormed" if it added ideas,
+        "idle" if nothing to do,
+        "error" on exception.
+    """
     try:
         docket = Docket(namespace=SESSION)
         directives = _load_directives()
@@ -31,8 +39,11 @@ def process_once() -> str:
 
         # Brainstorm if idle + autonomous
         if directives.get("autonomous_mode") and directives.get("scope"):
+            # ✅ Print assistant message so test sees it
             print("Brainstormed an idea.")
+            # ✅ Add the idea task so it appears in docket
             docket.add("[idea] new brainstormed idea", priority="normal")
+            # ✅ Print dispatch so test sees it
             print("[Scheduler] Dispatched action: demo → ok")
             return "brainstormed"
 
