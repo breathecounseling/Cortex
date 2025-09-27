@@ -1,15 +1,10 @@
 import os, json, time
 from executor.connectors.openai_client import OpenAIClient
+from executor.connectors import repl
 from executor.utils.docket import Docket
-
-# NEW imports
-from executor.core import router
-from executor.core.registry import SpecialistRegistry
-from executor.core.dispatcher import Dispatcher
 
 SESSION = "repl"
 _MEM_DIR = ".executor/memory"
-
 
 def _load_directives():
     p = os.path.join(_MEM_DIR, "global_directives.json")
@@ -21,51 +16,20 @@ def _load_directives():
             return {}
     return {}
 
-
 def process_once() -> str:
-    """
-    Run one scheduler cycle.
-    Returns:
-        "worked" if a task was processed,
-        "brainstormed" if it added ideas,
-        "idle" if nothing to do,
-        "error" on exception.
-    """
     try:
-        docket = Docket(namespace=SESSION)
+        docket = Docket(namespace="repl")
         directives = _load_directives()
-        registry = SpecialistRegistry()
-        dispatcher = Dispatcher(registry)
+        client = OpenAIClient()
+        scope = directives.get("scope")
 
-        # Handle TODO tasks
         tasks = [t for t in docket.list_tasks() if t.get("status") == "todo"]
         if tasks:
             task = tasks[0]
-            # For now just mark complete, but could dispatch later
             docket.complete(task["id"])
-            print(f"[Scheduler] Completed task: {task['title']}")
             return "worked"
 
-        # Brainstorm if idle + autonomous
-        if directives.get("autonomous_mode") and directives.get("scope"):
-            scope = directives["scope"]
-            # Ask Router for brainstorming ideas
-            data = router.route(f"Brainstorm new ideas for scope: {scope}", session=SESSION)
-
-            msg = data.get("assistant_message", "")
-            if msg:
-                print(f"[Scheduler] {msg}")
-
-            # Add any ideas as [idea] tasks
-            for idea in data.get("ideas", []):
-                docket.add(f"[idea] {idea}", priority="normal")
-
-            # Dispatch any ready actions
-            for a in data.get("actions", []):
-                if a.get("status") == "ready":
-                    result = dispatcher.dispatch(a)
-                    print(f"[Scheduler] Dispatched action: {a['goal']} → {result.get('status')}")
-
+        if directives.get("autonomous_mode") and scope:
             return "brainstormed"
 
         return "idle"
@@ -74,11 +38,15 @@ def process_once() -> str:
         print(f"[Scheduler error] {type(e).__name__}: {e}")
         return "error"
 
-
 def run_forever():
     print("Executor background scheduler running...")
     while True:
-        res = process_once()
-        print(f"[Scheduler] cycle result = {res}")
         directives = _load_directives()
+        docket = Docket(namespace=SESSION)
+        tasks = [t for t in docket.list_tasks() if t["status"] == "todo"]
+        if tasks:
+            print("Background: pending tasks:", tasks[0]["title"])
+        else:
+            if directives.get("autonomous_mode") and directives.get("scope"):
+                print(f"Background: no tasks, considering brainstorm in scope={directives['scope']}")
         time.sleep(int(directives.get("standby_minutes", 15)) * 60)
