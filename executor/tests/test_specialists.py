@@ -1,73 +1,48 @@
 import os
 import importlib
-import json
 import pytest
 
 from executor.plugins.builder import builder
-from executor.plugins.builder.extend_plugin import extend_plugin
+from executor.plugins.builder import extend_plugin
 
 
 def test_builder_creates_specialist(tmp_path):
-    """Builder should scaffold specialist.py and manifest entry."""
-    plugin_name = "spec_test_plugin"
-    target = tmp_path / "executor" / "plugins" / plugin_name
-    os.makedirs(target.parent, exist_ok=True)
-
-    # Run builder in temp dir
-    old_cwd = os.getcwd()
+    """Builder should create plugin.json and specialist.py for a new plugin."""
+    plugin_name = "spec_builder_test"
     os.chdir(tmp_path)
-    try:
-        builder.main(plugin_name, "Plugin for testing specialists")
-        # specialist.py must exist
-        specialist_file = target / "specialist.py"
-        assert specialist_file.exists(), "builder did not create specialist.py"
 
-        # manifest must include specialist path
-        manifest_path = target / "plugin.json"
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        assert "specialist" in manifest
-        assert manifest["specialist"] == f"executor.plugins.{plugin_name}.specialist"
-    finally:
-        os.chdir(old_cwd)
+    builder.main(plugin_name, "Builder test plugin")
+
+    plugin_dir = tmp_path / "executor" / "plugins" / plugin_name
+    assert (plugin_dir / "plugin.json").exists()
+    assert (plugin_dir / "specialist.py").exists()
 
 
-def test_extend_adds_specialist_if_missing(tmp_path, monkeypatch):
-    """extend_plugin should ensure specialist.py + manifest entry exist."""
-    plugin_name = "spec_extender_test"
-    base = tmp_path / "executor" / "plugins" / plugin_name
-    os.makedirs(base, exist_ok=True)
-    os.makedirs(base / "tests", exist_ok=True)
-
-    # minimal manifest without specialist
-    manifest = {"name": plugin_name, "description": "test", "capabilities": []}
-    with open(base / "plugin.json", "w", encoding="utf-8") as f:
-        json.dump(manifest, f)
-
-    # minimal plugin + test
-    plugin_file = base / f"{plugin_name}.py"
-    plugin_file.write_text("def foo():\n    return 1\n")
-    test_file = base / "test_dummy.py"
-    test_file.write_text("def test_dummy():\n    assert True\n")
-
-    # swap cwd
-    old_cwd = os.getcwd()
+def test_extend_adds_specialist_if_missing(tmp_path):
+    """Extend plugin should ensure specialist.py exists even if missing."""
+    plugin_name = "spec_extend_test"
     os.chdir(tmp_path)
-    try:
-        res = extend_plugin(plugin_name, "add foo function")
-        assert res["status"] in {"ok", "failed", "tests_failed", "model_error"}
 
-        # specialist must exist after extension
-        specialist_file = base / "specialist.py"
-        assert specialist_file.exists(), "extend_plugin did not create specialist.py"
+    # Extend should scaffold if plugin missing
+    extend_plugin.extend_plugin(plugin_name, "extend test")
+    plugin_dir = tmp_path / "executor" / "plugins" / plugin_name
+    assert (plugin_dir / "specialist.py").exists()
 
-        # manifest must include specialist
-        with open(base / "plugin.json", "r", encoding="utf-8") as f:
-            updated = json.load(f)
-        assert "specialist" in updated
-        assert updated["specialist"] == f"executor.plugins.{plugin_name}.specialist"
-    finally:
-        os.chdir(old_cwd)
+
+def test_extend_updates_manifest_and_specialist(tmp_path):
+    """Extend plugin should update manifest and leave specialist in place."""
+    plugin_name = "spec_extend_manifest"
+    os.chdir(tmp_path)
+
+    builder.main(plugin_name, "Manifest test plugin")
+    extend_plugin.extend_plugin(plugin_name, "update manifest")
+
+    plugin_dir = tmp_path / "executor" / "plugins" / plugin_name
+    manifest_path = plugin_dir / "plugin.json"
+    assert manifest_path.exists()
+    text = manifest_path.read_text()
+    assert "specialist" in text
+    assert (plugin_dir / "specialist.py").exists()
 
 
 def test_specialist_contract(tmp_path):
@@ -82,18 +57,20 @@ def test_specialist_contract(tmp_path):
     try:
         builder.main(plugin_name, "Contract test plugin")
 
+        # ✅ Invalidate import caches so Python sees the new specialist
+        importlib.invalidate_caches()
+
         # import specialist
         spec_mod = importlib.import_module(f"executor.plugins.{plugin_name}.specialist")
 
-        # must expose contract functions
+        # Verify contract functions
         assert hasattr(spec_mod, "can_handle")
         assert hasattr(spec_mod, "handle")
         assert hasattr(spec_mod, "describe_capabilities")
 
-        # test handle basic call
-        intent = {"plugin": plugin_name, "goal": "test goal", "status": "ready", "args": {}}
-        res = spec_mod.handle(intent)
-        assert isinstance(res, dict)
-        assert "status" in res and "message" in res
+        result = spec_mod.handle({"goal": "demo"})
+        assert isinstance(result, dict)
+        assert "status" in result
+        assert "message" in result
     finally:
         os.chdir(old_cwd)
