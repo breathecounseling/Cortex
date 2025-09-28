@@ -7,8 +7,10 @@ from executor.core import router
 from executor.connectors.openai_client import OpenAIClient
 from executor.utils.docket import Docket
 
-# ✅ Absolute path, resolves under cwd
-_MEM_DIR = os.path.abspath(os.path.join(os.getcwd(), ".executor", "memory"))
+# ✅ Allow override from environment (tests can inject tmp_memory)
+_MEM_DIR = os.environ.get("EXECUTOR_MEM_DIR")
+if not _MEM_DIR:
+    _MEM_DIR = os.path.abspath(os.path.join(os.getcwd(), ".executor", "memory"))
 os.makedirs(_MEM_DIR, exist_ok=True)
 
 SESSION = "default"
