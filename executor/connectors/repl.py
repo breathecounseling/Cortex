@@ -3,8 +3,8 @@ import json
 from typing import Optional
 
 from executor.plugins.conversation_manager import conversation_manager as cm
-from executor.core import router  # kept for future NL intent handling if desired
-from executor.connectors.openai_client import OpenAIClient  # needed for test stubbing
+from executor.core import router
+from executor.connectors.openai_client import OpenAIClient  # needed for tests
 from executor.utils.docket import Docket
 
 # Tests expect this module attribute to exist.
@@ -25,7 +25,7 @@ def main() -> None:
         cmd = user_text.strip()
         low = cmd.lower()
 
-        # -------- Deterministic Butler commands (keep all your existing ones) --------
+        # -------- Deterministic Butler commands --------
         if low == "quit":
             break
         if low == "clear_actions":
@@ -59,14 +59,12 @@ def main() -> None:
             print("[Butler] All pending questions cleared.")
             continue
 
-        # -------- Deterministic approve / reject for tests & power users --------
-        # approve <task-id>  -> set status todo + strip "[idea]" prefix
+        # -------- Approve / Reject commands --------
         if low.startswith("approve "):
             task_id = cmd.split(" ", 1)[1].strip()
             _approve_task(task_id)
             continue
 
-        # reject <task-id>   -> remove task from docket (tests expect ID to disappear)
         if low.startswith("reject "):
             task_id = cmd.split(" ", 1)[1].strip()
             _reject_task(task_id)
@@ -75,29 +73,37 @@ def main() -> None:
         # -------- Normal REPL flow (LLM-driven) --------
         print("🤔 Thinking…")
 
-        # Build messages for the LLM using conversation manager
         turn = cm.handle_repl_turn(user_text, session=SESSION)
         messages = turn.get("messages", [])
 
-        # Call OpenAIClient (tests stub this), then parse JSON result
         client = OpenAIClient()
         raw_out = client.chat(messages, response_format="json_object")
         try:
             data = json.loads(raw_out)
         except Exception:
-            # Fallback: if model didn't return JSON, pass through via router as a safeguard
             data = router.route(user_text, session=SESSION)
 
-        # Show assistant message
         if "assistant_message" in data and data["assistant_message"]:
             print(data["assistant_message"])
 
-        # Save facts (conversation_manager writes to _MEM_DIR via its own API)
+        # Save facts both via cm and into repl_facts.json (tests expect file)
         if "facts_to_save" in data:
+            facts_file = os.path.join(_MEM_DIR, "repl_facts.json")
+            existing = []
+            if os.path.exists(facts_file):
+                with open(facts_file, "r", encoding="utf-8") as f:
+                    try:
+                        existing = json.load(f)
+                    except Exception:
+                        existing = []
+            existing.extend(data["facts_to_save"])
+            with open(facts_file, "w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2)
+
             for fact in data["facts_to_save"]:
                 cm.save_fact(SESSION, fact["key"], fact["value"])
 
-        # Add tasks to the Docket (tests assert on Docket contents)
+        # Add tasks to Docket
         if "tasks_to_add" in data:
             docket = Docket(namespace="repl")
             for t in data["tasks_to_add"]:
@@ -106,19 +112,16 @@ def main() -> None:
                 if title:
                     docket.add(title, priority=priority)
 
-        # Persist actions (if any) so downstream tools can inspect
+        # Save actions
         if "actions" in data:
             existing = _load_actions()
             existing.extend(data["actions"])
             _save_actions(existing)
 
 
-# ----------------- Helpers for approve/reject via Docket -----------------
+# ----------------- Approve / Reject helpers -----------------
 
 def _approve_task(task_id: str) -> None:
-    """
-    Approve: set status to 'todo' and strip '[idea]' prefix from title.
-    """
     docket = Docket(namespace="repl")
     task = _docket_get(docket, task_id)
     if not task:
@@ -130,12 +133,6 @@ def _approve_task(task_id: str) -> None:
     try:
         docket.update(task_id, title=title, status="todo")
     except Exception:
-        # Fallback: if docket.update signature differs, try minimal status update
-        try:
-            docket.update(task_id, status="todo")
-        except Exception:
-            pass
-        # As last resort, remove + re-add with new title and todo status at end
         try:
             docket.remove(task_id)
             new_id = docket.add(title, priority=task.get("priority", "normal"))
@@ -148,21 +145,12 @@ def _approve_task(task_id: str) -> None:
 
 
 def _reject_task(task_id: str) -> None:
-    """
-    Reject: remove task from the docket (tests expect the ID to disappear).
-    """
     docket = Docket(namespace="repl")
     try:
         docket.remove(task_id)
         print(f"[Butler] Rejected idea {task_id}")
     except Exception:
-        # If the API differs, try marking as rejected; tests will still expect removal,
-        # but at least we provide feedback.
-        try:
-            docket.update(task_id, status="rejected")
-            print(f"[Butler] Marked idea {task_id} as rejected")
-        except Exception:
-            print(f"[Butler] Task {task_id} not found or could not be removed.")
+        print(f"[Butler] Task {task_id} not found or could not be removed.")
 
 
 def _strip_prefix(title: str, prefix: str) -> str:
@@ -177,7 +165,7 @@ def _docket_get(docket: Docket, task_id: str) -> Optional[dict]:
     return None
 
 
-# ----------------- Helpers for persistence (kept as-is) -----------------
+# ----------------- Persistence helpers (unchanged) -----------------
 
 def _load_actions():
     path = "repl_actions.json"
@@ -255,12 +243,7 @@ def _skip_questions():
     print("[Butler] Questions skipped for now.")
 
 
-# ----------------- Optional: assessment trigger helper kept if tests reference it -----------------
-
 def _assessment_trigger(text: str) -> bool:
-    """
-    Lightweight keyword trigger used by tests. Keep behavior consistent.
-    """
     terms = [
         "improve my billing",
         "client acquisition",
