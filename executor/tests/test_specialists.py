@@ -63,6 +63,9 @@ def test_specialist_contract(tmp_path):
         sys.modules.pop(f"executor.plugins.{plugin_name}", None)
         sys.modules.pop(f"executor.plugins.{plugin_name}.specialist", None)
 
+        # ✅ Reload parent package so it sees the new subpackage
+        importlib.reload(importlib.import_module("executor.plugins"))
+
         # Import specialist freshly
         spec_mod = importlib.import_module(f"executor.plugins.{plugin_name}.specialist")
 
