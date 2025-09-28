@@ -18,8 +18,9 @@ def main():
 
     for entry in os.listdir(BASE):
         plugin_dir = os.path.join(BASE, entry)
-        if not os.path.isdir(plugin_dir) or entry.startswith("__"):
-            continue  # ✅ skip __pycache__, hidden dirs
+        # ✅ Skip __pycache__ or hidden dirs
+        if not os.path.isdir(plugin_dir) or entry.startswith("__") or entry.endswith("__"):
+            continue
 
         manifest_file = os.path.join(plugin_dir, "plugin.json")
         specialist_file = os.path.join(plugin_dir, "specialist.py")
