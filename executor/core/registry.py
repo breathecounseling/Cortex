@@ -9,6 +9,8 @@ class SpecialistRegistry:
     def __init__(self, base: str = os.path.join("executor", "plugins")) -> None:
         self.base = base
         self.plugins: Dict[str, Any] = {}
+        # ✅ Always load available plugins on construction
+        self.refresh()
 
     def refresh(self) -> None:
         """Reload all specialists from plugin manifests in self.base."""
