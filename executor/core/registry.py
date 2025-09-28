@@ -9,7 +9,7 @@ class SpecialistRegistry:
     def __init__(self, base: str = os.path.join("executor", "plugins")) -> None:
         self.base = base
         self.plugins: Dict[str, Any] = {}
-        # ✅ Always load available plugins on construction
+        # Auto-load plugins on construction
         self.refresh()
 
     def refresh(self) -> None:
@@ -20,6 +20,12 @@ class SpecialistRegistry:
         abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
         if abs_executor_parent not in sys.path:
             sys.path.insert(0, abs_executor_parent)
+
+        # ✅ Clear caches and drop stale executor.plugin modules
+        importlib.invalidate_caches()
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("executor.plugins."):
+                sys.modules.pop(mod)
 
         if not os.path.isdir(self.base):
             return
