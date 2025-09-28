@@ -65,6 +65,10 @@ class SpecialistRegistry:
         """Return the specialist module for a given plugin name."""
         return self.plugins.get(name)
 
+    def get_specialist(self, name: str):
+        """Alias for get(): return the specialist module for a given plugin name."""
+        return self.plugins.get(name)
+
     def all(self):
         """Return a list of all loaded specialist modules."""
         return list(self.plugins.values())
