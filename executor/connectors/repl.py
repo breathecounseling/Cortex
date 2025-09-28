@@ -75,26 +75,35 @@ def main():
             print("Goodbye 👋")
             return
 
-        # Approve flow
+        # Approve
         if user_text.lower().startswith("approve "):
             tid = user_text.split(" ", 1)[1].strip()
             task = next((t for t in docket.list_tasks() if str(t.get("id")) == tid), None)
             if task:
                 new_title = _strip_idea_prefix(task["title"])
-                docket.update(tid, title=new_title, status="todo")
+                if hasattr(docket, "update"):
+                    docket.update(tid, title=new_title, status="todo")
+                else:
+                    # fallback: replace title and status in memory
+                    task["title"] = new_title
+                    task["status"] = "todo"
+                    docket.add(new_title, priority=task.get("priority", "normal"))
                 print("The task has been approved and is now ready to be progressed.")
             else:
                 print("Task not found.")
             continue
 
-        # Reject flow
+        # Reject
         if user_text.lower().startswith("reject "):
             tid = user_text.split(" ", 1)[1].strip()
-            docket.update(tid, status="rejected")
+            if hasattr(docket, "update"):
+                docket.update(tid, status="rejected")
+            else:
+                docket.complete(tid)
             print("The task has been rejected.")
             continue
 
-        # Normal chat path
+        # Normal chat
         cm_ctx = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
         facts = cm.load_facts(SESSION)
 
@@ -132,11 +141,29 @@ def main():
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
         actions = data.get("actions") or []
+        existing = _load_actions()
         for a in actions:
             if isinstance(a, dict):
-                _queue_action(a.get("plugin", ""), a.get("goal", ""), a.get("status", "pending"))
+                existing.append(
+                    {
+                        "plugin": a.get("plugin", ""),
+                        "goal": a.get("goal", ""),
+                        "status": a.get("status", "pending"),
+                        "queued_ts": _ts(),
+                    }
+                )
             elif isinstance(a, str):
-                _queue_action("repl", a, "pending")
+                existing.append(
+                    {
+                        "plugin": "repl",
+                        "goal": a,
+                        "status": "pending",
+                        "queued_ts": _ts(),
+                    }
+                )
+
+        # ✅ Save queued actions
+        _save_actions(existing)
 
         if any(isinstance(a, dict) and (a.get("status") or "").lower() == "ready" for a in actions):
             _execute_ready_actions()
