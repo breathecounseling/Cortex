@@ -1,4 +1,3 @@
-from __future__ import annotations
 import os
 import json
 from typing import Any, Dict
@@ -6,15 +5,17 @@ from typing import Any, Dict
 
 def _ensure_parent_packages_exist(base_dir: str) -> None:
     """
-    Ensure tmp scaffolds have package inits:
-      <base_dir>/executor/__init__.py
-      <base_dir>/executor/plugins/__init__.py
+    Ensure executor/ and executor/plugins/ are proper packages under base_dir.
+    This is needed when tests scaffold inside a pytest tmp_path.
     """
     exec_dir = os.path.join(base_dir, "executor")
     plugins_dir = os.path.join(exec_dir, "plugins")
     os.makedirs(plugins_dir, exist_ok=True)
-    for path in (os.path.join(exec_dir, "__init__.py"),
-                 os.path.join(plugins_dir, "__init__.py")):
+
+    for path in (
+        os.path.join(exec_dir, "__init__.py"),
+        os.path.join(plugins_dir, "__init__.py"),
+    ):
         if not os.path.exists(path):
             open(path, "w").close()
 
@@ -34,7 +35,7 @@ def _write_specialist_from_template_or_fallback(plugin_name: str, plugin_dir: st
     if os.path.exists(spec_file):
         return
 
-    # Try the template (repo path: executor/plugins/templates/specialist.py.j2)
+    # ✅ FIXED: correct template path (executor/templates/specialist.py.j2)
     template_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "templates", "specialist.py.j2")
     )
@@ -67,21 +68,24 @@ def handle(intent: Dict[str, Any]) -> Dict[str, Any]:
 
 def main(plugin_name: str, description: str | None = None) -> None:
     """
-    Tests call this as: builder.main(name, "Some description")
-    So the second arg is a STRING, not a dict.
+    Scaffolds a plugin package under executor/plugins/<plugin_name>/ with:
+      - plugin.json (primary contract; tests & extend_plugin rely on this)
+      - manifest.json (optional alias; harmless to keep parity with old code)
+      - specialist.py (from template, if missing)
+      - __init__.py (package marker for the plugin dir)
     """
     cwd = os.getcwd()
     _ensure_parent_packages_exist(cwd)
 
-    base = os.path.join("executor", "plugins", plugin_name)
-    os.makedirs(base, exist_ok=True)
+    plugin_dir = os.path.join("executor", "plugins", plugin_name)
+    os.makedirs(plugin_dir, exist_ok=True)
 
     # ensure plugin package
-    init_py = os.path.join(base, "__init__.py")
-    if not os.path.exists(init_py):
-        open(init_py, "w").close()
+    init_file = os.path.join(plugin_dir, "__init__.py")
+    if not os.path.exists(init_file):
+        open(init_file, "w").close()
 
-    # build manifest dict explicitly (do NOT do dict(description) etc.)
+    # build manifest dict explicitly
     manifest = {
         "name": plugin_name,
         "description": description or f"Plugin {plugin_name}",
@@ -89,11 +93,11 @@ def main(plugin_name: str, description: str | None = None) -> None:
         "specialist": f"executor.plugins.{plugin_name}.specialist",
     }
 
-    # write plugin.json (primary for tests) and manifest.json (compat)
-    _write_json(os.path.join(base, "plugin.json"), manifest)
-    _write_json(os.path.join(base, "manifest.json"), manifest)
+    # write plugin.json and manifest.json
+    _write_json(os.path.join(plugin_dir, "plugin.json"), manifest)
+    _write_json(os.path.join(plugin_dir, "manifest.json"), manifest)
 
     # specialist.py
-    _write_specialist_from_template_or_fallback(plugin_name, base)
+    _write_specialist_from_template_or_fallback(plugin_name, plugin_dir)
 
     print(f"✅ Created new plugin: {plugin_name}")
