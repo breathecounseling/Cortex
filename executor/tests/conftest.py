@@ -1,10 +1,16 @@
+import os
+import shutil
 import pytest
 
-# Stub OpenAIClient for all tests unless explicitly overridden
-@pytest.fixture(autouse=True)
-def stub_openai(monkeypatch):
-    class DummyClient:
-        def chat(self, messages, response_format=None):
-            return '{"assistant_message":"stubbed","actions":[],"tasks_to_add":[]}'
-    from executor.connectors import openai_client
-    monkeypatch.setattr(openai_client, "OpenAIClient", lambda: DummyClient())
+@pytest.fixture(autouse=True, scope="session")
+def _cleanup_plugin_cache_dirs():
+    base = os.path.join("executor", "plugins")
+    if os.path.isdir(base):
+        for entry in os.listdir(base):
+            if entry.startswith("__") or entry.endswith("__"):
+                p = os.path.join(base, entry)
+                if os.path.isdir(p):
+                    try:
+                        shutil.rmtree(p)
+                    except Exception:
+                        pass
