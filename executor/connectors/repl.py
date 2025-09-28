@@ -75,10 +75,8 @@ def main() -> None:
 
         data = None
         try:
-            # ✅ Tests monkeypatch this, so it must be the default path
             data = router.route(user_text, session=SESSION)
         except Exception:
-            # ✅ Fallback to real OpenAI call if not monkeypatched
             turn = cm.handle_repl_turn(user_text, session=SESSION)
             messages = turn.get("messages", [])
             client = OpenAIClient()
@@ -120,7 +118,7 @@ def main() -> None:
                 if title:
                     docket.add(title, priority=priority)
 
-        # Save actions
+        # Save actions under _MEM_DIR
         if "actions" in data:
             existing = _load_actions()
             existing.extend(data["actions"])
@@ -176,7 +174,7 @@ def _docket_get(docket: Docket, task_id: str) -> Optional[dict]:
 # ----------------- Persistence helpers -----------------
 
 def _load_actions():
-    path = "repl_actions.json"
+    path = os.path.join(_MEM_DIR, "repl_actions.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -184,12 +182,13 @@ def _load_actions():
 
 
 def _save_actions(actions):
-    with open("repl_actions.json", "w", encoding="utf-8") as f:
+    path = os.path.join(_MEM_DIR, "repl_actions.json")
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(actions, f, indent=2)
 
 
 def _load_tasks():
-    path = "repl_tasks.json"
+    path = os.path.join(_MEM_DIR, "repl_tasks.json")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -197,7 +196,8 @@ def _load_tasks():
 
 
 def _save_tasks(tasks):
-    with open("repl_tasks.json", "w", encoding="utf-8") as f:
+    path = os.path.join(_MEM_DIR, "repl_tasks.json")
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(tasks, f, indent=2)
 
 
