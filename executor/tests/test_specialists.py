@@ -58,15 +58,15 @@ def test_specialist_contract(tmp_path):
     try:
         builder.main(plugin_name, "Contract test plugin")
 
-        # ✅ Clear import caches and stale entries
+        # ✅ Clear caches and nuke all executor-related modules
         importlib.invalidate_caches()
-        sys.modules.pop(f"executor.plugins.{plugin_name}", None)
-        sys.modules.pop(f"executor.plugins.{plugin_name}.specialist", None)
+        for mod in list(sys.modules.keys()):
+            if mod.startswith("executor"):
+                sys.modules.pop(mod)
 
-        # ✅ Reload parent package so it sees the new subpackage
-        importlib.reload(importlib.import_module("executor.plugins"))
-
-        # Import specialist freshly
+        # Re-import fresh
+        executor_pkg = importlib.import_module("executor")
+        plugins_pkg = importlib.import_module("executor.plugins")
         spec_mod = importlib.import_module(f"executor.plugins.{plugin_name}.specialist")
 
         # Verify contract functions
