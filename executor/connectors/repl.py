@@ -9,7 +9,6 @@ from executor.connectors.openai_client import OpenAIClient
 from executor.utils.docket import Docket
 from executor.plugins.conversation_manager import conversation_manager as cm
 
-# --- storage ---
 _MEM_DIR = os.path.join(".executor", "memory")
 os.makedirs(_MEM_DIR, exist_ok=True)
 SESSION = "repl"
@@ -48,7 +47,6 @@ def _queue_action(plugin: str, goal: str, status: str = "pending") -> str:
 
 
 def _execute_ready_actions() -> None:
-    # This REPL keeps things simple for tests — mark as done immediately.
     actions = _load_actions()
     for a in actions:
         if (a.get("status") or "").lower() == "ready":
@@ -77,46 +75,26 @@ def main():
             print("Goodbye 👋")
             return
 
-        # ------------------------------------------------------------
-        # Approve / Reject flow for idea tasks (used by tests)
-        # ------------------------------------------------------------
+        # Approve flow
         if user_text.lower().startswith("approve "):
             tid = user_text.split(" ", 1)[1].strip()
-            try:
-                task = next((t for t in docket.list_tasks() if str(t.get("id")) == tid), None)
-                if task:
-                    new_title = _strip_idea_prefix(task["title"])
-                    # Always update the same task
-                    if hasattr(docket, "update"):
-                        docket.update(tid, title=new_title, status="todo")
-                    else:
-                        # Fallback: mark task manually
-                        task["title"] = new_title
-                        task["status"] = "todo"
-                    print(
-                        "The task has been approved and is now ready to be progressed."
-                    )
-                else:
-                    print("I couldn't find that task ID.")
-            except Exception:
-                print("I tried to approve that task but ran into an issue.")
+            task = next((t for t in docket.list_tasks() if str(t.get("id")) == tid), None)
+            if task:
+                new_title = _strip_idea_prefix(task["title"])
+                docket.update(tid, title=new_title, status="todo")
+                print("The task has been approved and is now ready to be progressed.")
+            else:
+                print("Task not found.")
             continue
 
+        # Reject flow
         if user_text.lower().startswith("reject "):
             tid = user_text.split(" ", 1)[1].strip()
-            try:
-                if hasattr(docket, "update"):
-                    docket.update(tid, status="rejected")
-                else:
-                    docket.complete(tid)
-                print("The task has been rejected.")
-            except Exception:
-                print("I tried to reject that task but ran into an issue.")
+            docket.update(tid, status="rejected")
+            print("The task has been rejected.")
             continue
 
-        # ------------------------------------------------------------
         # Normal chat path
-        # ------------------------------------------------------------
         cm_ctx = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
         facts = cm.load_facts(SESSION)
 
@@ -145,34 +123,24 @@ def main():
             print(msg)
         cm.record_assistant(SESSION, msg)
 
-        # Save facts
         for f in data.get("facts_to_save") or []:
             if isinstance(f, dict) and "key" in f and "value" in f:
                 cm.save_fact(SESSION, f["key"], f["value"])
 
-        # Add tasks
         for t in data.get("tasks_to_add") or []:
             if isinstance(t, dict) and t.get("title"):
                 docket.add(title=t["title"], priority=t.get("priority", "normal"))
 
-        # Queue actions
         actions = data.get("actions") or []
         for a in actions:
             if isinstance(a, dict):
-                _queue_action(
-                    a.get("plugin", ""), a.get("goal", ""), a.get("status", "pending")
-                )
+                _queue_action(a.get("plugin", ""), a.get("goal", ""), a.get("status", "pending"))
             elif isinstance(a, str):
                 _queue_action("repl", a, "pending")
 
-        # Execute if any ready
-        if any(
-            isinstance(a, dict) and (a.get("status") or "").lower() == "ready"
-            for a in actions
-        ):
+        if any(isinstance(a, dict) and (a.get("status") or "").lower() == "ready" for a in actions):
             _execute_ready_actions()
 
-        # Compatibility: write facts file for tests (repl_facts.json)
         try:
             facts_file = os.path.join(_MEM_DIR, f"{SESSION}_facts.json")
             _write_json(facts_file, cm.load_facts(SESSION))
