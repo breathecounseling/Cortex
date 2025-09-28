@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 from typing import Any, Dict
 
@@ -35,7 +36,7 @@ def _write_specialist_from_template_or_fallback(plugin_name: str, plugin_dir: st
     if os.path.exists(spec_file):
         return
 
-    # ✅ Correct template path
+    # ✅ Correct template path (executor/templates/specialist.py.j2)
     template_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "templates", "specialist.py.j2")
     )
@@ -80,10 +81,14 @@ def main(plugin_name: str, description: str | None = None) -> None:
     plugin_dir = os.path.join("executor", "plugins", plugin_name)
     os.makedirs(plugin_dir, exist_ok=True)
 
-    # ✅ NEW: ensure plugin package marker
+    # ✅ Ensure plugin package marker
     init_file = os.path.join(plugin_dir, "__init__.py")
     if not os.path.exists(init_file):
         open(init_file, "w").close()
+
+    # ✅ Ensure cwd is importable (needed for test_specialist_contract)
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
 
     # build manifest dict explicitly
     manifest = {
