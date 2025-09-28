@@ -9,7 +9,7 @@ from executor.plugins.builder import builder
 from executor.connectors import repl
 
 
-def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
+def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_path, capsys):
     """
     End-to-end test:
     - REPL handles user input → queues a ready action
@@ -17,12 +17,12 @@ def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
     - Both update Docket and produce visible output
     """
     plugin_name = "full_cycle_plugin"
-    plugin_dir = tmp_memory.parent / "executor" / "plugins" / plugin_name
+    plugin_dir = tmp_path / "executor" / "plugins" / plugin_name
     os.makedirs(plugin_dir.parent, exist_ok=True)
 
     # Scaffold plugin + specialist
     old_cwd = os.getcwd()
-    os.chdir(tmp_memory.parent)
+    os.chdir(tmp_path)
     builder.main(plugin_name, "Integration test plugin")
 
     # Import repl fresh
@@ -43,7 +43,7 @@ def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
             ],
         }
 
-    # ✅ Monkeypatch router so no real LLM calls
+    # Monkeypatch router so no real LLM calls
     monkeypatch.setattr("executor.core.router.route", fake_route_repl, raising=False)
 
     # Run REPL once with input
@@ -52,9 +52,8 @@ def test_full_cycle_repl_and_scheduler(monkeypatch, tmp_memory, capsys):
 
     # Capture printed output
     out = capsys.readouterr().out
-    # Allow either Router stub or OpenAI stub output
     assert ("Got it, I will build this." in out) or ("stubbed" in out)
 
-    # ✅ Verify action was recorded in REPL's actual memory dir
+    # ✅ Verify action was recorded in REPL's memory dir
     actions_path = os.path.join(repl._MEM_DIR, "repl_actions.json")
     assert os.path.exists(actions_path)
