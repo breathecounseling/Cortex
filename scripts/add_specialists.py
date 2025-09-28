@@ -16,11 +16,8 @@ def main():
         if not os.path.exists(manifest_file):
             continue
 
-        try:
-            with open(manifest_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            continue
+        with open(manifest_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
         expected = f"executor.plugins.{entry}.specialist"
         updated = False
@@ -31,15 +28,12 @@ def main():
 
         specialist_file = os.path.join(plugin_dir, "specialist.py")
         if not os.path.exists(specialist_file):
-            try:
-                tmpl_path = os.path.join("executor", "templates", "specialist.py.j2")
-                with open(tmpl_path, "r", encoding="utf-8") as tf:
-                    tmpl = tf.read()
-                with open(specialist_file, "w", encoding="utf-8") as sf:
-                    sf.write(tmpl.replace("{{ plugin_name }}", entry))
-                updated = True
-            except Exception as e:
-                print(f"[add_specialists] Could not create specialist for {entry}: {e}")
+            tmpl_path = os.path.join("executor", "templates", "specialist.py.j2")
+            with open(tmpl_path, "r", encoding="utf-8") as tf:
+                tmpl = tf.read()
+            with open(specialist_file, "w", encoding="utf-8") as sf:
+                sf.write(tmpl.replace("{{ plugin_name }}", entry))
+            updated = True
 
         if updated:
             with open(manifest_file, "w", encoding="utf-8") as f:
