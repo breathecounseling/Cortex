@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Any
 
-
 class Docket:
     """
     Tiny persistent task docket for prerequisites/steps the model proposes.
@@ -64,9 +63,9 @@ class Docket:
 
     def update(self, task_id: str, **updates) -> bool:
         """
-        Update fields of a task by id.
-        Example: docket.update(tid, title="New title", status="todo")
-        Returns True if task was found and updated.
+        Update fields of a task by id. Example:
+          docket.update(tid, title="New Title", status="todo")
+        Returns True if updated, False if not found.
         """
         for t in self._data.get("tasks", []):
             if t["id"] == task_id:
