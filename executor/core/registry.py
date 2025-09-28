@@ -1,61 +1,60 @@
-import importlib
-import json
 import os
 import sys
+import json
+import importlib
 from typing import Dict, Any
 
 
 class SpecialistRegistry:
-    """
-    Discover plugins under <base> and import their specialists.
-
-    Works for repo (executor/plugins) and for pytest tmp dirs (tmp/.../executor/plugins):
-    - Adds the parent of 'executor' to sys.path so 'executor.plugins.*' can import.
-    - Loads plugin.json and imports its "specialist" module.
-    """
-    def __init__(self, base: str = "executor/plugins"):
+    def __init__(self, base: str = os.path.join("executor", "plugins")) -> None:
         self.base = base
-        self.plugins: Dict[str, Dict[str, Any]] = {}
-        self.specialists: Dict[str, Any] = {}
-        self.refresh()
+        self.plugins: Dict[str, Any] = {}
 
-    def _ensure_importable(self) -> None:
-        # base → <root>/executor/plugins → we need <root> on sys.path
+    def refresh(self) -> None:
+        self.plugins.clear()
+
+        # Ensure parent of executor is importable (repo root or pytest tmp dir)
+        # If base == "<tmp>/executor/plugins", parent_of_executor = "<tmp>"
         abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
         if abs_executor_parent not in sys.path:
             sys.path.insert(0, abs_executor_parent)
 
-    def refresh(self) -> None:
-        self.plugins.clear()
-        self.specialists.clear()
         if not os.path.isdir(self.base):
             return
 
-        self._ensure_importable()
-
         for entry in os.listdir(self.base):
-            pdir = os.path.join(self.base, entry)
-            if not os.path.isdir(pdir):
+            plugin_dir = os.path.join(self.base, entry)
+            if not os.path.isdir(plugin_dir):
                 continue
-            manifest_file = os.path.join(pdir, "plugin.json")
-            if not os.path.exists(manifest_file):
+
+            # Prefer plugin.json (tests & extend_plugin write this),
+            # fall back to manifest.json for compatibility.
+            manifest_path = os.path.join(plugin_dir, "plugin.json")
+            if not os.path.exists(manifest_path):
+                alt = os.path.join(plugin_dir, "manifest.json")
+                manifest_path = alt if os.path.exists(alt) else None
+
+            if not manifest_path:
                 continue
+
             try:
-                with open(manifest_file, "r", encoding="utf-8") as f:
+                with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
-                self.plugins[entry] = manifest
-                specialist_path = manifest.get("specialist")
-                if specialist_path:
-                    mod = importlib.import_module(specialist_path)
-                    self.specialists[entry] = mod
             except Exception as e:
-                print(f"[Registry] Failed to load {entry}: {e}")
+                print(f"[Registry] Failed to read manifest for {entry}: {e}")
+                continue
 
-    def has_plugin(self, name: str) -> bool:
-        return name in self.plugins
+            # Resolve specialist module path
+            modname = manifest.get("specialist") or f"executor.plugins.{entry}.specialist"
 
-    def get_specialist(self, name: str):
-        return self.specialists.get(name)
+            try:
+                module = importlib.import_module(modname)
+                self.plugins[entry] = module
+            except Exception as e:
+                print(f"[Registry] Failed to import {modname}: {e}")
 
-    def list_plugins(self) -> Dict[str, Any]:
-        return self.plugins
+    def get(self, name: str):
+        return self.plugins.get(name)
+
+    def all(self):
+        return list(self.plugins.values())
