@@ -5,11 +5,13 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Any
 
+
 class Docket:
     """
     Tiny persistent task docket for prerequisites/steps the model proposes.
     Stored at .executor/memory/<namespace>_docket.json
     """
+
     def __init__(self, namespace: str = "repl"):
         self.namespace = namespace
         self._dir = os.path.join(".executor", "memory")
@@ -73,3 +75,12 @@ class Docket:
                 self._save()
                 return True
         return False
+
+    def remove(self, task_id: str) -> bool:
+        """
+        Remove a task by id. Returns True if removed, False if not found.
+        """
+        before = len(self._data.get("tasks", []))
+        self._data["tasks"] = [t for t in self._data.get("tasks", []) if t.get("id") != task_id]
+        self._save()
+        return len(self._data["tasks"]) < before
