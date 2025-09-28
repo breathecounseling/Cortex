@@ -7,7 +7,7 @@ from executor.core import router
 from executor.connectors.openai_client import OpenAIClient
 from executor.utils.docket import Docket
 
-# ✅ Absolute path so tests and runtime align
+# ✅ Absolute path, resolves under cwd
 _MEM_DIR = os.path.abspath(os.path.join(os.getcwd(), ".executor", "memory"))
 os.makedirs(_MEM_DIR, exist_ok=True)
 
@@ -75,10 +75,9 @@ def main() -> None:
 
         data = None
         try:
-            # Tests monkeypatch this path
+            # Tests monkeypatch this
             data = router.route(user_text, session=SESSION)
         except Exception:
-            # Fallback to OpenAI if not monkeypatched
             turn = cm.handle_repl_turn(user_text, session=SESSION)
             messages = turn.get("messages", [])
             client = OpenAIClient()
