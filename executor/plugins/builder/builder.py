@@ -108,6 +108,21 @@ def main(plugin_name: str, description: str | None = None) -> None:
     # ✅ Debug output
     print(f"✅ Created new plugin: {plugin_name}")
     print(f"📂 Plugin dir: {os.path.abspath(plugin_dir)}")
+
+    # Print the sys.path head (to confirm tmp_path is there)
+    print("🔍 sys.path[0:3] =", sys.path[0:3])
+
+    # Explicitly check package markers
+    markers = [
+        os.path.join("executor", "__init__.py"),
+        os.path.join("executor", "plugins", "__init__.py"),
+        os.path.join("executor", "plugins", plugin_name, "__init__.py"),
+    ]
+    for marker in markers:
+        print(f"   exists? {marker} -> {os.path.exists(marker)}")
+
+    # List actual files under plugin dir
     for root, dirs, files in os.walk(plugin_dir):
         for f in files:
-            print(f"  - {os.path.relpath(os.path.join(root, f), start=cwd)}")
+            rel = os.path.relpath(os.path.join(root, f), start=cwd)
+            print(f"   - {rel}")
