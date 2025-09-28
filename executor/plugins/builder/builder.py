@@ -35,7 +35,7 @@ def _write_specialist_from_template_or_fallback(plugin_name: str, plugin_dir: st
     if os.path.exists(spec_file):
         return
 
-    # ✅ FIXED: correct template path (executor/templates/specialist.py.j2)
+    # ✅ Correct template path
     template_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "templates", "specialist.py.j2")
     )
@@ -69,10 +69,10 @@ def handle(intent: Dict[str, Any]) -> Dict[str, Any]:
 def main(plugin_name: str, description: str | None = None) -> None:
     """
     Scaffolds a plugin package under executor/plugins/<plugin_name>/ with:
-      - plugin.json (primary contract; tests & extend_plugin rely on this)
-      - manifest.json (optional alias; harmless to keep parity with old code)
-      - specialist.py (from template, if missing)
-      - __init__.py (package marker for the plugin dir)
+      - plugin.json (tests & extend_plugin rely on this)
+      - manifest.json (compatibility alias)
+      - specialist.py (from template or fallback)
+      - __init__.py (package markers at all levels)
     """
     cwd = os.getcwd()
     _ensure_parent_packages_exist(cwd)
@@ -80,7 +80,7 @@ def main(plugin_name: str, description: str | None = None) -> None:
     plugin_dir = os.path.join("executor", "plugins", plugin_name)
     os.makedirs(plugin_dir, exist_ok=True)
 
-    # ensure plugin package
+    # ✅ NEW: ensure plugin package marker
     init_file = os.path.join(plugin_dir, "__init__.py")
     if not os.path.exists(init_file):
         open(init_file, "w").close()
