@@ -17,7 +17,7 @@ class SpecialistRegistry:
         self.plugins.clear()
         self.specialists.clear()
 
-        # Ensure the directory that contains `executor` is importable
+        # Add the directory containing "executor" to sys.path
         abs_root = os.path.abspath(os.path.join(self.base, "..", ".."))
         if abs_root not in sys.path:
             sys.path.insert(0, abs_root)
