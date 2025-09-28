@@ -81,13 +81,7 @@ def main():
             task = next((t for t in docket.list_tasks() if str(t.get("id")) == tid), None)
             if task:
                 new_title = _strip_idea_prefix(task["title"])
-                if hasattr(docket, "update"):
-                    docket.update(tid, title=new_title, status="todo")
-                else:
-                    # fallback: replace title and status in memory
-                    task["title"] = new_title
-                    task["status"] = "todo"
-                    docket.add(new_title, priority=task.get("priority", "normal"))
+                docket.update(tid, title=new_title, status="todo")
                 print("The task has been approved and is now ready to be progressed.")
             else:
                 print("Task not found.")
@@ -96,10 +90,11 @@ def main():
         # Reject
         if user_text.lower().startswith("reject "):
             tid = user_text.split(" ", 1)[1].strip()
-            if hasattr(docket, "update"):
-                docket.update(tid, status="rejected")
-            else:
-                docket.complete(tid)
+            # Mark rejected then remove task from docket
+            tasks = docket.list_tasks()
+            tasks = [t for t in tasks if str(t.get("id")) != tid]
+            docket._data["tasks"] = tasks
+            docket._save()
             print("The task has been rejected.")
             continue
 
@@ -162,7 +157,7 @@ def main():
                     }
                 )
 
-        # ✅ Save queued actions
+        # ✅ Always persist actions so tests can find repl_actions.json
         _save_actions(existing)
 
         if any(isinstance(a, dict) and (a.get("status") or "").lower() == "ready" for a in actions):
