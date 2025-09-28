@@ -6,27 +6,40 @@ from typing import Dict, Any
 
 
 class SpecialistRegistry:
+    """
+    Dynamically discovers plugins and loads their specialists.
+
+    Contract:
+      - Works for the repo tree (executor/plugins) and pytest tmp trees (…/tmp/.../executor/plugins).
+      - Loads plugin.json and imports the module path in "specialist".
+      - Exposes has_plugin(), get_specialist(), list_plugins().
+    """
     def __init__(self, base: str = "executor/plugins"):
         self.base = base
         self.plugins: Dict[str, Dict[str, Any]] = {}
         self.specialists: Dict[str, Any] = {}
         self.refresh()
 
+    def _ensure_importable(self) -> None:
+        """
+        Ensure the directory that *contains* the 'executor' package is on sys.path.
+        If base is .../<root>/executor/plugins, we need to add .../<root> to sys.path.
+        """
+        if not self.base:
+            return
+        # parent of executor (…/tmproot OR repo root)
+        abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
+        if abs_executor_parent not in sys.path:
+            sys.path.insert(0, abs_executor_parent)
+
     def refresh(self) -> None:
         """Re-scan plugin directories for manifests + specialists."""
         self.plugins.clear()
         self.specialists.clear()
+        if not os.path.isdir(self.base):
+            return
 
-        # Ensure parent of executor is on sys.path
-        abs_root = os.path.abspath(os.path.join(self.base, "..", ".."))
-        if abs_root not in sys.path:
-            sys.path.insert(0, abs_root)
-
-        # Also ensure tmp test dirs are importable
-        if self.base and os.path.isdir(self.base):
-            abs_tmp = os.path.abspath(os.path.join(self.base, "..", ".."))
-            if abs_tmp not in sys.path:
-                sys.path.insert(0, abs_tmp)
+        self._ensure_importable()
 
         for entry in os.listdir(self.base):
             pdir = os.path.join(self.base, entry)
