@@ -1,4 +1,5 @@
 import os
+import sys
 import importlib
 import pytest
 
@@ -57,10 +58,12 @@ def test_specialist_contract(tmp_path):
     try:
         builder.main(plugin_name, "Contract test plugin")
 
-        # ✅ Invalidate import caches so Python sees the new specialist
+        # ✅ Clear import caches and stale entries
         importlib.invalidate_caches()
+        sys.modules.pop(f"executor.plugins.{plugin_name}", None)
+        sys.modules.pop(f"executor.plugins.{plugin_name}.specialist", None)
 
-        # import specialist
+        # Import specialist freshly
         spec_mod = importlib.import_module(f"executor.plugins.{plugin_name}.specialist")
 
         # Verify contract functions
