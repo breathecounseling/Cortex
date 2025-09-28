@@ -1,10 +1,10 @@
-# executor/utils/docket.py
 from __future__ import annotations
 import os
 import json
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any
+
 
 class Docket:
     """
@@ -61,3 +61,16 @@ class Docket:
         self._data["tasks"] = [t for t in self._data.get("tasks", []) if t.get("status") != "done"]
         self._save()
         return before - len(self._data["tasks"])
+
+    def update(self, task_id: str, **updates) -> bool:
+        """
+        Update fields of a task by id.
+        Example: docket.update(tid, title="New title", status="todo")
+        Returns True if task was found and updated.
+        """
+        for t in self._data.get("tasks", []):
+            if t["id"] == task_id:
+                t.update(updates)
+                self._save()
+                return True
+        return False
