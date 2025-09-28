@@ -17,11 +17,16 @@ class SpecialistRegistry:
         self.plugins.clear()
         self.specialists.clear()
 
-        # Add the parent directory of `executor` to sys.path
-        # If base = ".../executor/plugins", we want ".../" so "executor" is importable.
-        abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
-        if abs_executor_parent not in sys.path:
-            sys.path.insert(0, abs_executor_parent)
+        # Ensure parent of executor is on sys.path
+        abs_root = os.path.abspath(os.path.join(self.base, "..", ".."))
+        if abs_root not in sys.path:
+            sys.path.insert(0, abs_root)
+
+        # Also ensure tmp test dirs are importable
+        if self.base and os.path.isdir(self.base):
+            abs_tmp = os.path.abspath(os.path.join(self.base, "..", ".."))
+            if abs_tmp not in sys.path:
+                sys.path.insert(0, abs_tmp)
 
         for entry in os.listdir(self.base):
             pdir = os.path.join(self.base, entry)
