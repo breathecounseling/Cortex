@@ -21,10 +21,10 @@ class SpecialistRegistry:
         if abs_executor_parent not in sys.path:
             sys.path.insert(0, abs_executor_parent)
 
-        # ✅ Clear caches and drop stale executor.plugin modules
+        # ✅ Clear caches and drop all executor-related modules
         importlib.invalidate_caches()
         for mod in list(sys.modules.keys()):
-            if mod.startswith("executor.plugins."):
+            if mod == "executor" or mod.startswith("executor."):
                 sys.modules.pop(mod)
 
         if not os.path.isdir(self.base):
