@@ -11,10 +11,10 @@ class SpecialistRegistry:
         self.plugins: Dict[str, Any] = {}
 
     def refresh(self) -> None:
+        """Reload all specialists from plugin manifests in self.base."""
         self.plugins.clear()
 
         # Ensure parent of executor is importable (repo root or pytest tmp dir)
-        # If base == "<tmp>/executor/plugins", parent_of_executor = "<tmp>"
         abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
         if abs_executor_parent not in sys.path:
             sys.path.insert(0, abs_executor_parent)
@@ -54,7 +54,13 @@ class SpecialistRegistry:
                 print(f"[Registry] Failed to import {modname}: {e}")
 
     def get(self, name: str):
+        """Return the specialist module for a given plugin name."""
         return self.plugins.get(name)
 
     def all(self):
+        """Return a list of all loaded specialist modules."""
         return list(self.plugins.values())
+
+    def has_plugin(self, name: str) -> bool:
+        """Return True if the registry has a specialist loaded for this name."""
+        return name in self.plugins
