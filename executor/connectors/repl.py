@@ -7,8 +7,8 @@ from executor.core import router
 from executor.connectors.openai_client import OpenAIClient
 from executor.utils.docket import Docket
 
-# Tests expect this module attribute to exist.
-_MEM_DIR = os.path.join(".executor", "memory")
+# ✅ Absolute path so tests and runtime align
+_MEM_DIR = os.path.abspath(os.path.join(os.getcwd(), ".executor", "memory"))
 os.makedirs(_MEM_DIR, exist_ok=True)
 
 SESSION = "default"
@@ -75,8 +75,10 @@ def main() -> None:
 
         data = None
         try:
+            # Tests monkeypatch this path
             data = router.route(user_text, session=SESSION)
         except Exception:
+            # Fallback to OpenAI if not monkeypatched
             turn = cm.handle_repl_turn(user_text, session=SESSION)
             messages = turn.get("messages", [])
             client = OpenAIClient()
@@ -92,7 +94,7 @@ def main() -> None:
         if "assistant_message" in data and data["assistant_message"]:
             print(data["assistant_message"])
 
-        # Save facts (also write to repl_facts.json for tests)
+        # Save facts (also mirror to repl_facts.json for tests)
         if "facts_to_save" in data:
             facts_file = os.path.join(_MEM_DIR, "repl_facts.json")
             existing = []
