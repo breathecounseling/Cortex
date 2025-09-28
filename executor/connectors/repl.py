@@ -1,148 +1,152 @@
-from __future__ import annotations
-import json
 import os
-import sys
-from datetime import datetime, timezone
-from typing import Any, Dict, List
-
-from executor.utils.docket import Docket
+import json
 from executor.plugins.conversation_manager import conversation_manager as cm
-from executor.core import router  # ✅ use router for structured outputs
+from executor.core import router
 
-_MEM_DIR = os.path.join(".executor", "memory")
-os.makedirs(_MEM_DIR, exist_ok=True)
-SESSION = "repl"
+SESSION = "default"
 
 
-def _ts() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def main() -> None:
+    print("Executor — chat naturally. Type 'quit' to exit.")
+
+    while True:
+        user_text = input("> ")
+        if not user_text:
+            continue
+
+        cmd = user_text.strip().lower()
+        if cmd == "quit":
+            break
+        if cmd == "clear_actions":
+            _save_actions([])
+            print("[Butler] All pending actions cleared.")
+            continue
+        if cmd == "debug_on":
+            print("🔧 Debug mode enabled.")
+            continue
+        if cmd == "debug_off":
+            print("🔧 Debug mode disabled.")
+            continue
+        if cmd == "show_notes":
+            _show_notes()
+            continue
+        if cmd == "clear_notes":
+            _save_notes([])
+            print("[Butler] All notes cleared.")
+            continue
+        if cmd == "pause_notes":
+            print("[Butler] Notes paused for this module.")
+            continue
+        if cmd == "answer_questions":
+            _show_questions()
+            continue
+        if cmd == "skip_questions":
+            _skip_questions()
+            continue
+        if cmd == "clear_questions":
+            _save_questions([])
+            print("[Butler] All pending questions cleared.")
+            continue
+
+        # Normal REPL flow
+        print("🤔 Thinking…")
+        data = router.route(user_text, session=SESSION)
+
+        # Show assistant message
+        if "assistant_message" in data:
+            print(data["assistant_message"])
+
+        # Save facts
+        if "facts_to_save" in data:
+            for fact in data["facts_to_save"]:
+                cm.save_fact(SESSION, fact["key"], fact["value"])
+
+        # Save tasks
+        if "tasks_to_add" in data:
+            existing = _load_tasks()
+            existing.extend(data["tasks_to_add"])
+            _save_tasks(existing)
+
+        # Save actions
+        if "actions" in data:
+            existing = _load_actions()
+            existing.extend(data["actions"])
+            _save_actions(existing)
 
 
-def _write_json(path: str, data) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+# ----------------- Helpers for persistence -----------------
 
-
-def _actions_path() -> str:
-    return os.path.join(_MEM_DIR, f"{SESSION}_actions.json")
-
-
-def _load_actions() -> List[Dict[str, Any]]:
-    path = _actions_path()
+def _load_tasks():
+    path = "repl_tasks.json"
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return []
 
 
-def _save_actions(actions: List[Dict[str, Any]]) -> None:
-    _write_json(_actions_path(), actions)
+def _save_tasks(tasks):
+    with open("repl_tasks.json", "w", encoding="utf-8") as f:
+        json.dump(tasks, f, indent=2)
 
 
-def _execute_ready_actions() -> None:
-    actions = _load_actions()
-    changed = False
-    for a in actions:
-        if (a.get("status") or "").lower() == "ready":
-            a["status"] = "done"
-            changed = True
-    if changed:
-        _save_actions(actions)
+def _load_actions():
+    path = "repl_actions.json"
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
 
-def _strip_idea_prefix(title: str) -> str:
-    if title.startswith("[idea] "):
-        return title[len("[idea] "):]
-    if title.startswith("[idea]"):
-        return title[len("[idea]"):].lstrip()
-    return title
+def _save_actions(actions):
+    with open("repl_actions.json", "w", encoding="utf-8") as f:
+        json.dump(actions, f, indent=2)
 
 
-def main():
-    print("Executor — at your service. Let’s chat. Type 'quit' to exit.")
-    docket = Docket(namespace=SESSION)
-
-    for raw in sys.stdin:
-        user_text = (raw or "").strip()
-        if not user_text:
-            continue
-        if user_text.lower() in {"quit", "exit"}:
-            print("Goodbye 👋")
-            return
-
-        # Approve
-        if user_text.lower().startswith("approve "):
-            tid = user_text.split(" ", 1)[1].strip()
-            tasks = docket.list_tasks()
-            task = next((t for t in tasks if str(t.get("id")) == tid), None)
-            if not task:
-                print("Task not found.")
-                continue
-            docket.update(tid, title=_strip_idea_prefix(task["title"]), status="todo")
-            print("The task has been approved and is now ready to be progressed.")
-            continue
-
-        # Reject (remove)
-        if user_text.lower().startswith("reject "):
-            tid = user_text.split(" ", 1)[1].strip()
-            tasks = [t for t in docket.list_tasks() if str(t.get("id")) != tid]
-            docket._data["tasks"] = tasks
-            docket._save()
-            print("The task has been rejected.")
-            continue
-
-        # Normal chat via Router
-        cm_ctx = cm.handle_repl_turn(user_text, session=SESSION, limit=50)
-        facts = cm.load_facts(SESSION)
-
-        print("🤔 Thinking…")
-        data = router.route(user_text, session=SESSION)
-
-        # Show assistant message
-        msg = data.get("assistant_message", "") or ""
-        if msg:
-            print(msg)
-        cm.record_assistant(SESSION, msg)
-
-        # Save facts
-        for f in data.get("facts_to_save") or []:
-            if isinstance(f, dict) and "key" in f and "value" in f:
-                cm.save_fact(SESSION, f["key"], f["value"])
-
-        # Add tasks
-        for t in data.get("tasks_to_add") or []:
-            if isinstance(t, dict) and t.get("title"):
-                docket.add(title=t["title"], priority=t.get("priority", "normal"))
-
-        # Persist actions (create repl_actions.json even if empty)
-        existing = _load_actions()
-        for a in data.get("actions") or []:
-            if isinstance(a, dict):
-                existing.append({
-                    "plugin": a.get("plugin", ""),
-                    "goal": a.get("goal", ""),
-                    "status": a.get("status", "pending"),
-                    "queued_ts": _ts(),
-                })
-            elif isinstance(a, str):
-                existing.append({
-                    "plugin": "repl",
-                    "goal": a,
-                    "status": "pending",
-                    "queued_ts": _ts(),
-                })
-        _save_actions(existing)  # ✅ now the file always exists
-
-        # Execute immediately if anything was marked ready
-        if any(isinstance(a, dict) and (a.get("status") or "").lower() == "ready" for a in data.get("actions") or []):
-            _execute_ready_actions()
-
-        # Compatibility: write facts snapshot
-        try:
-            _write_json(os.path.join(_MEM_DIR, f"{SESSION}_facts.json"), cm.load_facts(SESSION))
-        except Exception:
-            pass
+def _load_notes():
+    path = "repl_notes.json"
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
 
-if __name__ == "__main__":
-    main()
+def _save_notes(notes):
+    with open("repl_notes.json", "w", encoding="utf-8") as f:
+        json.dump(notes, f, indent=2)
+
+
+def _show_notes():
+    notes = _load_notes()
+    if not notes:
+        print("[Butler] No notes saved.")
+        return
+    print("[Butler] Notes:")
+    for note in notes:
+        print(f"- {note}")
+
+
+def _load_questions():
+    path = "repl_questions.json"
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def _save_questions(questions):
+    with open("repl_questions.json", "w", encoding="utf-8") as f:
+        json.dump(questions, f, indent=2)
+
+
+def _show_questions():
+    questions = _load_questions()
+    if not questions:
+        print("[Butler] No pending questions.")
+        return
+    print(f"[Butler] You still have {len(questions)} pending question(s).")
+    for q in questions:
+        print(f"- {q}")
+
+
+def _skip_questions():
+    print("[Butler] Questions skipped for now.")
