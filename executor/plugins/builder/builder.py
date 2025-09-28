@@ -36,7 +36,7 @@ def _write_specialist_from_template_or_fallback(plugin_name: str, plugin_dir: st
     if os.path.exists(spec_file):
         return
 
-    # ✅ Correct template path (executor/templates/specialist.py.j2)
+    # Template path (corrected to executor/templates/)
     template_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "templates", "specialist.py.j2")
     )
@@ -81,16 +81,16 @@ def main(plugin_name: str, description: str | None = None) -> None:
     plugin_dir = os.path.join("executor", "plugins", plugin_name)
     os.makedirs(plugin_dir, exist_ok=True)
 
-    # ✅ Ensure plugin package marker
+    # Ensure plugin package marker
     init_file = os.path.join(plugin_dir, "__init__.py")
     if not os.path.exists(init_file):
         open(init_file, "w").close()
 
-    # ✅ Ensure cwd is importable (needed for test_specialist_contract)
+    # Ensure cwd is importable (needed for test_specialist_contract)
     if cwd not in sys.path:
         sys.path.insert(0, cwd)
 
-    # build manifest dict explicitly
+    # Build manifest dict explicitly
     manifest = {
         "name": plugin_name,
         "description": description or f"Plugin {plugin_name}",
@@ -98,11 +98,16 @@ def main(plugin_name: str, description: str | None = None) -> None:
         "specialist": f"executor.plugins.{plugin_name}.specialist",
     }
 
-    # write plugin.json and manifest.json
+    # Write plugin.json and manifest.json
     _write_json(os.path.join(plugin_dir, "plugin.json"), manifest)
     _write_json(os.path.join(plugin_dir, "manifest.json"), manifest)
 
-    # specialist.py
+    # Write specialist.py
     _write_specialist_from_template_or_fallback(plugin_name, plugin_dir)
 
+    # ✅ Debug output
     print(f"✅ Created new plugin: {plugin_name}")
+    print(f"📂 Plugin dir: {os.path.abspath(plugin_dir)}")
+    for root, dirs, files in os.walk(plugin_dir):
+        for f in files:
+            print(f"  - {os.path.relpath(os.path.join(root, f), start=cwd)}")
