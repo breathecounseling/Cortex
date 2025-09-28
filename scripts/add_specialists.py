@@ -1,4 +1,5 @@
-import os, json
+import os
+import json
 
 BASE = os.path.join("executor", "plugins")
 TEMPLATE = os.path.join("executor", "templates", "specialist.py.j2")
@@ -18,19 +19,23 @@ def main():
 
     for entry in os.listdir(BASE):
         plugin_dir = os.path.join(BASE, entry)
-        # ✅ Skip __pycache__ or hidden dirs
+        # Skip non-plugin folders such as __pycache__
         if not os.path.isdir(plugin_dir) or entry.startswith("__") or entry.endswith("__"):
             continue
 
         manifest_file = os.path.join(plugin_dir, "plugin.json")
         specialist_file = os.path.join(plugin_dir, "specialist.py")
 
-        updated = False
+        # Ensure manifest
         manifest = {}
-
+        updated = False
         if os.path.exists(manifest_file):
-            with open(manifest_file, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
+            try:
+                with open(manifest_file, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            except Exception as e:
+                print(f"[add_specialists] WARNING: Could not parse {manifest_file}: {e}")
+                continue
         else:
             manifest = {"name": entry, "description": f"{entry} plugin", "capabilities": []}
             updated = True
@@ -45,11 +50,15 @@ def main():
                 json.dump(manifest, f, indent=2)
             print(f"✅ Updated manifest for {entry}")
 
+        # Ensure specialist.py
         if not os.path.exists(specialist_file):
-            code = template_src.replace("{{ plugin_name }}", entry)
-            with open(specialist_file, "w", encoding="utf-8") as sf:
-                sf.write(code)
-            print(f"✅ Created specialist.py for {entry}")
+            try:
+                code = template_src.replace("{{ plugin_name }}", entry)
+                with open(specialist_file, "w", encoding="utf-8") as sf:
+                    sf.write(code)
+                print(f"✅ Created specialist.py for {entry}")
+            except Exception as e:
+                print(f"[add_specialists] ERROR: Could not create specialist for {entry}: {e}")
 
 
 if __name__ == "__main__":
