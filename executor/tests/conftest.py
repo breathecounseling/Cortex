@@ -1,7 +1,10 @@
 import os
 import shutil
 import pytest
+import sys, os
 
+
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__) + "/.."))
 @pytest.fixture(autouse=True, scope="session")
 def _cleanup_plugin_cache_dirs():
     base = os.path.join("executor", "plugins")
