@@ -19,16 +19,18 @@ def main():
 
     for entry in os.listdir(BASE):
         plugin_dir = os.path.join(BASE, entry)
-        # Skip non-plugin folders such as __pycache__
-        if not os.path.isdir(plugin_dir) or entry.startswith("__") or entry.endswith("__"):
+        # ✅ Skip __pycache__ or hidden dirs
+        if not os.path.isdir(plugin_dir):
+            continue
+        if entry.startswith("__") or entry.endswith("__"):
             continue
 
         manifest_file = os.path.join(plugin_dir, "plugin.json")
         specialist_file = os.path.join(plugin_dir, "specialist.py")
 
-        # Ensure manifest
-        manifest = {}
         updated = False
+        manifest = {}
+
         if os.path.exists(manifest_file):
             try:
                 with open(manifest_file, "r", encoding="utf-8") as f:
@@ -50,7 +52,6 @@ def main():
                 json.dump(manifest, f, indent=2)
             print(f"✅ Updated manifest for {entry}")
 
-        # Ensure specialist.py
         if not os.path.exists(specialist_file):
             try:
                 code = template_src.replace("{{ plugin_name }}", entry)
