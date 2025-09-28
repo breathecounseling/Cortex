@@ -3,6 +3,10 @@ import json
 from executor.plugins.conversation_manager import conversation_manager as cm
 from executor.core import router
 
+# Tests expect this module attribute to exist.
+_MEM_DIR = os.path.join(".executor", "memory")
+os.makedirs(_MEM_DIR, exist_ok=True)
+
 SESSION = "default"
 
 
