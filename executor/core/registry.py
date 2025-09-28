@@ -7,10 +7,12 @@ from typing import Dict, Any
 
 class SpecialistRegistry:
     """
-    Dynamically discovers plugins and loads their specialists.
-    Works both in repo (executor/plugins) and tmp_path tests.
-    """
+    Discover plugins under <base> and import their specialists.
 
+    Works for repo (executor/plugins) and for pytest tmp dirs (tmp/.../executor/plugins):
+    - Adds the parent of 'executor' to sys.path so 'executor.plugins.*' can import.
+    - Loads plugin.json and imports its "specialist" module.
+    """
     def __init__(self, base: str = "executor/plugins"):
         self.base = base
         self.plugins: Dict[str, Dict[str, Any]] = {}
@@ -18,18 +20,12 @@ class SpecialistRegistry:
         self.refresh()
 
     def _ensure_importable(self) -> None:
-        """
-        Ensure the directory that contains the 'executor' package
-        is on sys.path (for both repo and tmp_path).
-        """
-        if not self.base:
-            return
-        executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
-        if executor_parent not in sys.path:
-            sys.path.insert(0, executor_parent)
+        # base → <root>/executor/plugins → we need <root> on sys.path
+        abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
+        if abs_executor_parent not in sys.path:
+            sys.path.insert(0, abs_executor_parent)
 
     def refresh(self) -> None:
-        """Re-scan plugin directories for manifests + specialists."""
         self.plugins.clear()
         self.specialists.clear()
         if not os.path.isdir(self.base):
