@@ -3,14 +3,21 @@ import sys
 import shutil
 import pytest
 
-# ✅ Ensure the repo root (Cortex/) is on sys.path
-# This makes `import executor.connectors.repl` work no matter what cwd is.
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# --- Ensure imports always work, even after chdir into tmp dirs ---
+
+# Absolute path to repo root (Cortex/)
+HERE = os.path.abspath(os.path.dirname(__file__))
+ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-print(">>> Using sys.path[0] =", sys.path[0])  # DEBUG, can remove later
+# Also add executor/ directly as an extra safety net
+EXECUTOR_DIR = os.path.join(ROOT, "executor")
+if EXECUTOR_DIR not in sys.path:
+    sys.path.insert(0, EXECUTOR_DIR)
 
+# --- Fixtures ---
 
 @pytest.fixture(autouse=True, scope="session")
 def _cleanup_plugin_cache_dirs():
