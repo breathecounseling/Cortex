@@ -2,8 +2,8 @@ openai==1.2.3
 google-api-python-client==2.108.0
 google-auth==2.23.0
 python-telegram-bot==20.5
-pandas==2.1.1
-requests==2.31.0
+pandas==2.2.2
+requests==.31.0
 python-dotenv==1.0.1
 pytest==8.2.2
 anyio==4.7.0
