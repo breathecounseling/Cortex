@@ -8,3 +8,4 @@ python-dotenv==1.0.1
 pytest==8.2.2
 anyio==4.7.0
 typing-extensions==4.12.2
+jinja2>=3.0.0
