@@ -1,0 +1,18 @@
+"""
+Auto-generated specialist for {{ plugin_name }}.
+"""
+
+from typing import Dict, Any
+
+def can_handle(intent: Dict[str, Any]) -> bool:
+    return intent.get("plugin") == "{{ plugin_name }}"
+
+def handle(intent: Dict[str, Any]) -> Dict[str, Any]:
+    goal = intent.get("goal", "")
+    return {
+        "status": "ok",
+        "message": f"[{{ plugin_name }}] handled goal: {goal}",
+    }
+
+def describe_capabilities() -> list[str]:
+    return ["basic {{ plugin_name }} functionality"]
