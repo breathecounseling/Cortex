@@ -10,11 +10,8 @@ from executor.utils.memory import init_db_if_needed
 
 logger = get_logger(__name__)
 
-class Registry:
-    """
-    Discovers and loads plugin specialists.
-    """
 
+class Registry:
     def __init__(self, root: Optional[Path] = None, base: Optional[str] = None):
         ensure_dirs()
         init_db_if_needed()
@@ -33,12 +30,12 @@ class Registry:
             try:
                 data = json.loads(manifest_path.read_text(encoding="utf-8"))
                 caps = data.get("capabilities", [])
-                spec_path = data.get("specialist")
-                if caps and spec_path:
+                spec = data.get("specialist")
+                if caps and spec:
                     for cap in caps:
-                        self._capabilities[cap] = spec_path
-            except Exception as e:
-                logger.error(f"Manifest read failed {manifest_path}: {e}")
+                        self._capabilities[cap] = spec
+            except Exception:
+                continue
 
     def get_specialist_for(self, capability: str):
         mod_path = self._capabilities.get(capability)
@@ -51,8 +48,9 @@ class Registry:
     def capabilities(self):
         return sorted(self._capabilities.keys())
 
-    # legacy test helper
+    # compatibility
     def has_plugin(self, name: str) -> bool:
-        return any(name in v for v in self._capabilities.values())
+        return name in self._capabilities
+
 
 SpecialistRegistry = Registry
