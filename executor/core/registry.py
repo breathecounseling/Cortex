@@ -10,15 +10,23 @@ from executor.utils.memory import init_db_if_needed
 
 logger = get_logger(__name__)
 
+
 class Registry:
+    """
+    Plugin registry that discovers manifests under executor/plugins and provides
+    capability -> specialist module mapping. Compatible with legacy test helpers.
+    """
+
     def __init__(self, root: Optional[Path] = None, base: Optional[str] = None):
         ensure_dirs()
         init_db_if_needed()
         self.root = Path(base) if base else (root or Path.cwd())
-        self.plugins_dir = self.root
-        # If a project root was provided, look in executor/plugins under it:
+        # The tests sometimes pass base=<tmp>/executor/plugins; handle both cases.
         if (self.root / "executor" / "plugins").exists():
             self.plugins_dir = self.root / "executor" / "plugins"
+        else:
+            self.plugins_dir = self.root
+
         self._capabilities: Dict[str, str] = {}
         self._plugin_names: Set[str] = set()
         self._specialists: Dict[str, object] = {}
@@ -52,12 +60,20 @@ class Registry:
             self._specialists[mod_path] = import_module(mod_path)
         return self._specialists[mod_path]
 
+    # -------- Legacy helpers used in tests --------
+    def has_plugin(self, name: str) -> bool:
+        # Either we saw the plugin name in manifest["name"] or a capability equals the name
+        return (name in self._plugin_names) or (name in self._capabilities)
+
+    def get_specialist(self, name: str):
+        # Tests call this expecting a specialist object by plugin/capability name
+        return self.get_specialist_for(name)
+
+    # ----------------------------------------------
+
     def capabilities(self):
         return sorted(self._capabilities.keys())
 
-    # compatibility expected by tests
-    def has_plugin(self, name: str) -> bool:
-        return (name in self._plugin_names) or (name in self._capabilities)
 
 # compatibility alias
 SpecialistRegistry = Registry
