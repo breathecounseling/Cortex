@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 TEMPLATE_SPECIALIST = """from __future__ import annotations
 
 def can_handle(intent: str) -> bool:
-    return intent.lower().strip() == "{name}"
+    return True
 
 def describe_capabilities() -> str:
     return "{description}"
@@ -30,7 +30,6 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def _ensure_packages(base: Path) -> None:
-    # ensure executor/ and executor/plugins/ are packages for importlib
     for rel in ("executor", "executor/plugins"):
         pkg = base / rel
         pkg.mkdir(parents=True, exist_ok=True)
