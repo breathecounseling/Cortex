@@ -55,3 +55,5 @@ class Registry:
 
     def capabilities(self):
         return sorted(self._capabilities.keys())
+
+SpecialistRegistry = Registry
