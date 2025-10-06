@@ -15,6 +15,9 @@ def describe_capabilities() -> str:
 def handle(payload: Dict[str, Any]) -> Dict[str, Any]:
     initialize_logging()
     init_db_if_needed()
-    # Real calendar logic would go here; stub response for now
     logger.info("Calendar handler invoked")
     return {"status": "ok", "message": "Calendar action processed", "data": payload}
+
+# compatibility helper expected by tests
+def run():
+    return handle({})
