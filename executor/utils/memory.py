@@ -1,4 +1,3 @@
-# executor/utils/memory.py
 from __future__ import annotations
 import sqlite3
 import json
@@ -8,28 +7,87 @@ from typing import Any, Dict, Iterable, List, Optional
 from datetime import datetime
 
 from executor.audit.logger import get_logger
-from .config import get_config, ensure_dirs
+from executor.utils.config import get_config, ensure_dirs
 
 log = get_logger(__name__)
 _conn_lock = threading.Lock()
 _initialized = False
 
+_EMBEDDED_SCHEMA = """
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT,
+  session_id TEXT,
+  type TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  confidence REAL DEFAULT 1.0,
+  source TEXT,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME,
+  active INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_facts_type_key ON facts(type, key);
+CREATE INDEX IF NOT EXISTS idx_facts_user_session_time ON facts(user_id, session_id, timestamp DESC);
+CREATE TABLE IF NOT EXISTS preferences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT,
+  category TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  weight REAL DEFAULT 1.0,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  origin_fact INTEGER REFERENCES facts(id) ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_prefs_user_key ON preferences(user_id, key);
+CREATE INDEX IF NOT EXISTS idx_prefs_category ON preferences(category);
+CREATE TABLE IF NOT EXISTS repairs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT,
+  file TEXT NOT NULL,
+  error TEXT NOT NULL,
+  fix_summary TEXT,
+  success INTEGER NOT NULL DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_repairs_file_time ON repairs(file, created_at DESC);
+CREATE TABLE IF NOT EXISTS conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT,
+  session TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_conv_session_time ON conversations(session, timestamp DESC);
+CREATE TABLE IF NOT EXISTS embeddings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  vector BLOB NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_embed_fact ON embeddings(fact_id);
+"""
+
 def _connect() -> sqlite3.Connection:
     cfg = get_config()
     db_path = Path(cfg["MEMORY_DB_PATH"])
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-def _exec_script(conn: sqlite3.Connection, sql_path: Path) -> None:
-    sql = sql_path.read_text(encoding="utf-8")
-    conn.executescript(sql)
+def _exec_script(conn: sqlite3.Connection, sql_text: str) -> None:
+    conn.executescript(sql_text)
     conn.commit()
 
 def init_db_if_needed() -> None:
     """
-    Ensure .executor/memory/memory.db exists and matches the init schema.
-    Idempotent and thread-safe.
+    Ensure memory DB exists and schema is initialized.
+    If schema file is missing (e.g., tmp test dirs), use embedded SQL.
     """
     global _initialized
     if _initialized:
@@ -37,21 +95,19 @@ def init_db_if_needed() -> None:
     ensure_dirs()
     cfg = get_config()
     db = Path(cfg["MEMORY_DB_PATH"])
-    sql = Path(cfg["SCHEMA_INIT_SQL"])
-    if not db.exists():
-        with _conn_lock:
-            with _connect() as conn:
-                if sql.exists():
-                    _exec_script(conn, sql)
-                    log.info(f"Initialized memory DB from schema: {sql}")
-                else:
-                    log.warning(f"Schema not found at {sql}; memory DB not initialized!")
+    schema_path = Path(cfg["SCHEMA_INIT_SQL"])
+
+    with _conn_lock, _connect() as conn:
+        if not db.exists():
+            if schema_path.exists():
+                _exec_script(conn, schema_path.read_text(encoding="utf-8"))
+                log.info(f"Initialized memory DB from schema: {schema_path}")
+            else:
+                _exec_script(conn, _EMBEDDED_SCHEMA)
+                log.info("Initialized memory DB from embedded schema")
     _initialized = True
 
 def _append_jsonl(record: Dict[str, Any]) -> None:
-    """
-    Append a JSON record to the raw memory log for audit/rebuild.
-    """
     cfg = get_config()
     path = Path(cfg["MEMORY_LOG_JSONL"])
     line = json.dumps(record, ensure_ascii=False)
@@ -71,9 +127,6 @@ def remember(
     expires_at: Optional[str] = None,
     active: int = 1,
 ) -> int:
-    """
-    Persist a fact to both SQLite and the JSONL log. Returns new fact id.
-    """
     init_db_if_needed()
     rec = {
         "ts": datetime.utcnow().isoformat(timespec="seconds"),
@@ -109,9 +162,6 @@ def recall(
     limit: int = 10,
     include_inactive: bool = False,
 ) -> List[Dict[str, Any]]:
-    """
-    Query facts with simple filters. Returns latest-first.
-    """
     init_db_if_needed()
     where = ["1=1"]
     params: List[Any] = []
@@ -132,9 +182,6 @@ def recall(
         return [dict(r) for r in rows]
 
 def forget(fact_id: int) -> None:
-    """
-    Soft-delete a fact (active=0). Keeps audit trail in JSONL.
-    """
     init_db_if_needed()
     with _conn_lock, _connect() as conn:
         conn.execute("UPDATE facts SET active=0 WHERE id=?", (fact_id,))
@@ -142,9 +189,6 @@ def forget(fact_id: int) -> None:
     _append_jsonl({"ts": datetime.utcnow().isoformat(timespec="seconds"), "event": "forget", "id": fact_id})
 
 def record_repair(file: str, error: str, fix_summary: str, *, user_id: Optional[str] = None, success: bool = False) -> int:
-    """
-    Persist a self-healer repair record and audit log.
-    """
     init_db_if_needed()
     _append_jsonl({
         "ts": datetime.utcnow().isoformat(timespec="seconds"),
@@ -162,49 +206,3 @@ def record_repair(file: str, error: str, fix_summary: str, *, user_id: Optional[
         )
         conn.commit()
         return int(cur.lastrowid)
-
-def log_conversation(session: str, role: str, content: str, *, user_id: Optional[str] = None) -> int:
-    """
-    Optional structured conversation logging (beyond existing JSONL).
-    """
-    init_db_if_needed()
-    with _conn_lock, _connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO conversations (user_id, session, role, content) VALUES (?, ?, ?, ?)",
-            (user_id, session, role, content),
-        )
-        conn.commit()
-        return int(cur.lastrowid)
-
-def export_json(tables: Iterable[str] = ("facts","preferences","repairs","conversations")) -> Dict[str, Any]:
-    """
-    Snapshot tables → JSON for manual sync/backups.
-    """
-    init_db_if_needed()
-    out: Dict[str, Any] = {}
-    with _conn_lock, _connect() as conn:
-        for t in tables:
-            try:
-                out[t] = [dict(r) for r in conn.execute(f"SELECT * FROM {t}")]
-            except sqlite3.Error:
-                out[t] = []
-    return out
-
-def import_json(snapshot: Dict[str, Any]) -> None:
-    """
-    Basic importer that inserts rows without de-dup (callers can pre-clean).
-    """
-    init_db_if_needed()
-    with _conn_lock, _connect() as conn:
-        for t, rows in snapshot.items():
-            if not isinstance(rows, list):
-                continue
-            for r in rows:
-                cols = ", ".join(r.keys())
-                qs = ", ".join(["?"] * len(r))
-                try:
-                    conn.execute(f"INSERT INTO {t} ({cols}) VALUES ({qs})", tuple(r.values()))
-                except sqlite3.Error:
-                    # skip conflicts silently (simple strategy for now)
-                    continue
-        conn.commit()
