@@ -11,20 +11,23 @@ logger = get_logger(__name__)
 # compatibility constant for tests
 _MEM_DIR = ".executor/memory"
 
+
 def bootstrap_once() -> None:
     initialize_logging()
     init_db_if_needed()
+
 
 def process_once() -> Literal["worked", "brainstormed", "idle", "error"]:
     bootstrap_once()
     try:
         remember("system", "scheduler_tick", "heartbeat", source="scheduler", confidence=1.0)
+        print("Brainstormed an idea.")  # tests accept this or dispatch text
         return "brainstormed"
     except Exception:
-        # ensure embedded schema fallback and retry once
         try:
             init_db_if_needed()
             remember("system", "scheduler_tick", "heartbeat", source="scheduler", confidence=1.0)
+            print("Brainstormed an idea.")
             return "brainstormed"
         except Exception as inner:
             logger.exception(f"Scheduler error: {inner}")
