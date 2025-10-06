@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Literal
 
+from executor.connectors.openai_client import OpenAIClient
 from executor.audit.logger import get_logger, initialize_logging
 from executor.utils.memory import init_db_if_needed, remember
 from executor.utils.docket import Docket, Task
