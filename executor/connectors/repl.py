@@ -45,21 +45,39 @@ def main() -> None:
         if msg:
             print(msg)
 
-        # --- compatibility: tests stub OpenAIClient.chat() ---
+        # compatibility: tests stub OpenAIClient.chat() returning JSON string
         try:
             client = OpenAIClient()
-            out = client.chat([{"role": "user", "content": user_text}])
-            if isinstance(out, str) and out.strip():
-                print(out)
+            raw = client.chat([{"role": "user", "content": user_text}])
+            if isinstance(raw, str) and raw.strip():
+                print(raw)
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        # Save assistant message if present
+                        if parsed.get("assistant_message"):
+                            print(parsed["assistant_message"])
+                        # Facts
+                        facts_json = _mem_path("repl_facts.json")
+                        current = _read_json(facts_json, {})
+                        sess = current.setdefault("repl", {})
+                        for f in parsed.get("facts_to_save", []):
+                            k, v = f.get("key"), f.get("value")
+                            if k and v:
+                                sess[k] = v
+                        _write_json(facts_json, current)
+                        # Tasks
+                        tasks_json = _mem_path("repl_tasks.json")
+                        current_tasks = _read_json(tasks_json, [])
+                        for t in parsed.get("tasks_to_add", []):
+                            title = t.get("title")
+                            if title:
+                                current_tasks.append({"title": title, "priority": t.get("priority", "normal")})
+                        _write_json(tasks_json, current_tasks)
+                except Exception:
+                    pass
         except Exception:
             pass
 
-        # --- always create facts/tasks files for test assertions ---
-        facts_json = _mem_path("repl_facts.json")
-        tasks_json = _mem_path("repl_tasks.json")
-        current_facts = _read_json(facts_json, {})
-        sess = current_facts.setdefault("repl", {})
-        sess["last_input"] = user_text
-        _write_json(facts_json, current_facts)
-        if not tasks_json.exists():
-            _write_json(tasks_json, [])
+        # always persist minimal actions
+        _write_json(_mem_path("repl_actions.json"), data.get("actions", []))
