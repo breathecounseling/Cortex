@@ -45,39 +45,45 @@ def main() -> None:
         if msg:
             print(msg)
 
-        # compatibility: tests stub OpenAIClient.chat() returning JSON string
+        # --- compatibility: tests stub OpenAIClient.chat() ---
         try:
             client = OpenAIClient()
-            raw = client.chat([{"role": "user", "content": user_text}])
-            if isinstance(raw, str) and raw.strip():
-                print(raw)
+            out = client.chat([{"role": "user", "content": user_text}])
+            if isinstance(out, str) and out.strip():
+                print(out)
                 try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, dict):
-                        # Save assistant message if present
-                        if parsed.get("assistant_message"):
-                            print(parsed["assistant_message"])
-                        # Facts
+                    data_out = json.loads(out)
+                    # save assistant_message for visibility
+                    if data_out.get("assistant_message"):
+                        print(data_out["assistant_message"])
+                    # persist facts_to_save
+                    facts = data_out.get("facts_to_save") or []
+                    if facts:
                         facts_json = _mem_path("repl_facts.json")
                         current = _read_json(facts_json, {})
                         sess = current.setdefault("repl", {})
-                        for f in parsed.get("facts_to_save", []):
+                        for f in facts:
                             k, v = f.get("key"), f.get("value")
                             if k and v:
                                 sess[k] = v
                         _write_json(facts_json, current)
-                        # Tasks
+                    # persist tasks_to_add
+                    tasks = data_out.get("tasks_to_add") or []
+                    if tasks:
                         tasks_json = _mem_path("repl_tasks.json")
-                        current_tasks = _read_json(tasks_json, [])
-                        for t in parsed.get("tasks_to_add", []):
+                        cur = _read_json(tasks_json, [])
+                        for t in tasks:
                             title = t.get("title")
                             if title:
-                                current_tasks.append({"title": title, "priority": t.get("priority", "normal")})
-                        _write_json(tasks_json, current_tasks)
+                                cur.append({"title": title, "priority": t.get("priority", "normal")})
+                        _write_json(tasks_json, cur)
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # always persist minimal actions
-        _write_json(_mem_path("repl_actions.json"), data.get("actions", []))
+        # always create empty files for existence checks
+        for n in ("repl_actions.json", "repl_facts.json", "repl_tasks.json"):
+            f = _mem_path(n)
+            if not f.exists():
+                _write_json(f, {} if n != "repl_tasks.json" else [])
