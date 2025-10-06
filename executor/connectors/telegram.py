@@ -1,76 +1,60 @@
-# executor/connectors/telegram.py
 from __future__ import annotations
-import os
-import requests
-from dotenv import load_dotenv
+from pathlib import Path
+from typing import List, Optional
 
-from executor.plugins.conversation_manager.conversation_manager import save_turn
+from executor.audit.logger import get_logger, initialize_logging
+from executor.utils.memory import init_db_if_needed
 
-load_dotenv()
+try:
+    from telegram import Bot  # type: ignore
+except Exception:  # pragma: no cover (optional dep)
+    Bot = None  # graceful fallback
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # add to .env
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")      # your user or group chat ID
+logger = get_logger(__name__)
+OFFSET_FILE = Path(".executor") / "memory" / "telegram_offset.txt"
 
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-def send_message(text: str) -> bool:
-    """
-    Send a text message via Telegram bot to the configured chat.
-    """
-    if not BOT_TOKEN or not CHAT_ID:
-        print("⚠️ Telegram not configured (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID).")
-        return False
-
+def _read_offset() -> Optional[int]:
+    if not OFFSET_FILE.exists():
+        return None
     try:
-        r = requests.post(f"{API_URL}/sendMessage", json={"chat_id": CHAT_ID, "text": text})
-        return r.status_code == 200
+        text = OFFSET_FILE.read_text(encoding="utf-8").strip()
+        return int(text) if text else None
     except Exception as e:
-        print(f"Telegram send error: {e}")
-        return False
+        logger.warning(f"Failed reading Telegram offset: {e}")
+        return None
 
+def _write_offset(update_id: int) -> None:
+    OFFSET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        OFFSET_FILE.write_text(str(update_id), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed writing Telegram offset: {e}")
 
-def get_updates(offset: int | None = None) -> list[dict]:
+def poll_updates(token: str) -> List[dict]:
     """
-    Fetch new messages sent to the bot.
+    Poll updates from Telegram safely. Returns a list of update dicts.
     """
-    if not BOT_TOKEN:
+    initialize_logging()
+    init_db_if_needed()
+
+    if Bot is None:
+        logger.info("python-telegram-bot not installed; skipping poll")
         return []
+
+    bot = Bot(token=token)
+    offset = _read_offset()
     try:
-        params = {"timeout": 10}
-        if offset:
-            params["offset"] = offset
-        r = requests.get(f"{API_URL}/getUpdates", params=params, timeout=20)
-        if r.status_code == 200:
-            return r.json().get("result", [])
+        updates = bot.get_updates(offset=offset or 0, timeout=30)
+        out = []
+        max_id = offset or 0
+        for u in updates:
+            d = {"update_id": u.update_id, "message": getattr(u, "message", None)}
+            out.append(d)
+            if u.update_id > max_id:
+                max_id = u.update_id
+        if max_id:
+            _write_offset(max_id + 1)
+        return out
     except Exception as e:
-        print(f"Telegram poll error: {e}")
-    return []
-
-
-def process_replies(session: str = "repl") -> None:
-    """
-    Poll for replies and save them into conversation history.
-    Use scheduler to run this periodically.
-    """
-    offset_file = ".executor/telegram_offset"
-    last_offset = None
-    if os.path.exists(offset_file):
-        try:
-            last_offset = int(open(offset_file).read().strip())
-        except Exception:
-            pass
-
-    updates = get_updates(offset=last_offset + 1 if last_offset else None)
-    for u in updates:
-        update_id = u["update_id"]
-        message = u.get("message") or {}
-        text = message.get("text")
-        from_user = message.get("from", {}).get("username", "unknown")
-
-        if text:
-            save_turn(session, "user", f"[Telegram @{from_user}]: {text}")
-            print(f"📩 Telegram reply from {from_user}: {text}")
-
-        # advance offset so we don’t reprocess
-        with open(offset_file, "w") as f:
-            f.write(str(update_id))
+        logger.exception(f"Telegram polling failed: {e}")
+        return []
