@@ -1,39 +1,32 @@
-"""
-Dispatcher for Executor actions.
-
-- Given an action {plugin, goal, status, args}
-- Looks up the specialist in the Registry
-- Calls specialist.handle(intent)
-- Returns structured result {status, message, artifacts?, facts?}
-"""
-
+from __future__ import annotations
 from typing import Dict, Any
-from executor.core.registry import SpecialistRegistry
 
+from executor.audit.logger import get_logger
+from .registry import Registry
+
+logger = get_logger(__name__)
 
 class Dispatcher:
-    def __init__(self, registry: SpecialistRegistry | None = None):
-        self.registry = registry or SpecialistRegistry()
+    """
+    Simple dispatcher that calls specialist.handle(payload) if can_handle matches.
+    """
+    def __init__(self, registry: Registry | None = None):
+        self.registry = registry or Registry()
 
-    def dispatch(self, action: Dict[str, Any]) -> Dict[str, Any]:
-        plugin = action.get("plugin")
-        specialist = self.registry.get_specialist(plugin)
+    def dispatch(self, capability: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        specialist = self.registry.get_specialist_for(capability)
         if not specialist:
-            return {
-                "status": "error",
-                "message": f"No specialist found for plugin={plugin}",
-            }
+            msg = f"No specialist found for capability '{capability}'"
+            logger.warning(msg)
+            return {"status": "error", "message": msg}
 
-        if hasattr(specialist, "can_handle") and not specialist.can_handle(action):
-            return {
-                "status": "skipped",
-                "message": f"Specialist for {plugin} declined to handle {action.get('goal')}",
-            }
+        if hasattr(specialist, "can_handle") and not specialist.can_handle(capability):
+            logger.debug(f"Specialist refuses capability '{capability}'")
+            return {"status": "skip", "message": "Specialist declined"}
 
-        try:
-            result = specialist.handle(action)
-            if not isinstance(result, dict):
-                raise ValueError("specialist.handle must return dict")
-            return result
-        except Exception as e:
-            return {"status": "error", "message": f"{type(e).__name__}: {e}"}
+        if not hasattr(specialist, "handle"):
+            msg = f"Specialist missing 'handle' for capability '{capability}'"
+            logger.error(msg)
+            return {"status": "error", "message": msg}
+
+        return specialist.handle(payload or {})
