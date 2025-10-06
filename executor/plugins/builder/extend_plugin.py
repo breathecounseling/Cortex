@@ -17,23 +17,20 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def extend_plugin(plugin_name: str, instruction: str, base_dir: Optional[Path] = None) -> dict:
-    """
-    Ensure plugin exists, manifest has specialist, and record the extension.
-    Returns a dict with at least {"status": "ok", "manifest": {…}} for tests.
-    """
     init_db_if_needed()
     base = base_dir or Path.cwd()
     plugin_dir = base / "executor" / "plugins" / plugin_name
     manifest_path = plugin_dir / "plugin.json"
 
     if not manifest_path.exists():
-        # scaffold missing plugin minimally
         _builder.main(plugin_name, f"Specialist for {plugin_name}", base_dir=base)
 
     data = _read_json(manifest_path)
+    if instruction not in data.get("capabilities", []):
+        data.setdefault("capabilities", []).append(instruction)
     if not data.get("specialist"):
         data["specialist"] = f"executor.plugins.{plugin_name}.specialist"
-        _write_json(manifest_path, data)
+    _write_json(manifest_path, data)
 
     try:
         remember("system", "plugin_extended", f"{plugin_name}:{instruction}", source="builder")
