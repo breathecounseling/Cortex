@@ -14,7 +14,6 @@ class Task:
     meta: Dict[str, Any] = field(default_factory=dict)
 
 class Docket:
-    # --- NEW: global registry so tasks persist between instances in tests ---
     _GLOBAL_TASKS: List[Task] = []
 
     def __init__(self, namespace: Optional[str] = None) -> None:
@@ -36,7 +35,6 @@ class Docket:
             return [t for t in self._items if t.status == status]
         return list(self._items)
 
-    # --- NEW: compatibility for tests calling list_tasks() ---
     def list_tasks(self) -> List[Dict[str, Any]]:
         return [t.__dict__ for t in self._items]
 
@@ -54,5 +52,15 @@ class Docket:
             if t.title == title:
                 self._items.pop(i)
                 logger.info(f"Docket remove: {title}")
+                return True
+        return False
+
+    # NEW: used when approving/rejecting "[idea]" tasks in tests
+    def approve(self, title: str) -> bool:
+        for t in self._items:
+            if t.title == title:
+                t.status = "todo"
+                if t.title.startswith("[idea] "):
+                    t.title = t.title.replace("[idea] ", "", 1)
                 return True
         return False
