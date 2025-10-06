@@ -1,148 +1,54 @@
-"""
-Conversation Manager for Cortex Executor
-- Stores turns in JSONL files
-- Summarizes/prunes long history
-- Provides handle_repl_turn() that formats prior context
-- Stores user facts as structured JSON objects with a timestamp, key, and value
-"""
-
-import os
-import json
-from datetime import datetime, timezone
+from __future__ import annotations
 from pathlib import Path
-from contextlib import contextmanager
-import time
-import uuid
-import string
+import json
+from typing import Dict, Any, List
 
-_MEM_DIR = os.path.join(".executor", "memory")
-os.makedirs(_MEM_DIR, exist_ok=True)
+from executor.audit.logger import get_logger
+from executor.utils.memory import remember, recall, init_db_if_needed
 
+logger = get_logger(__name__)
 
-BASE_PATH = Path(os.environ.get("CONV_MGR_MEMORY_PATH", ".executor/memory"))
-BASE_PATH.mkdir(parents=True, exist_ok=True)
+MEM_DIR = Path(".executor") / "memory"
+FACTS_FILE = MEM_DIR / "repl_facts.json"   # retained for compatibility
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-def _session_path(session: str) -> Path:
-    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in session)
-    return BASE_PATH / f"{safe}.jsonl"
-
-@contextmanager
-def _file_lock(path: Path, timeout: float = 5.0):
-    lockfile = str(path) + ".lock"
-    start = time.time()
-    while True:
-        try:
-            fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            break
-        except FileExistsError:
-            if (time.time() - start) >= timeout:
-                break
-            time.sleep(0.05)
-    try:
-        yield
-    finally:
-        try:
-            os.remove(lockfile)
-        except FileNotFoundError:
-            pass
-
-def save_turn(session: str, role: str, content: str) -> None:
-    path = _session_path(session)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rec = {
-        "timestamp": _utc_now(),
-        "role": role,
-        "content": content,
-    }
-    with _file_lock(path):
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-def load_turns(session: str) -> list[dict]:
-    path = _session_path(session)
+def _read_json(path: Path) -> Dict[str, Any]:
     if not path.exists():
-        return []
-    out = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
-    return out
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
-def clear_turns(session: str) -> None:
-    path = _session_path(session)
-    if path.exists():
-        with _file_lock(path):
-            open(path, "w").close()
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-# --- Fact management ---
+def load_facts(session: str) -> Dict[str, Any]:
+    # Backward compatible: read local file
+    data = _read_json(FACTS_FILE)
+    return data.get(session, {})
 
-def save_fact(session: str, key: str, value: str) -> None:
-    fact_record = {
-        "timestamp": _utc_now(),
-        "key": key,
-        "value": value
-    }
-    save_turn(session, "user_fact", json.dumps(fact_record))
+def save_fact(session: str, key: str, value: Any) -> None:
+    init_db_if_needed()
+    # File for legacy/tools:
+    data = _read_json(FACTS_FILE)
+    sess = data.setdefault(session, {})
+    sess[key] = value
+    _write_json(FACTS_FILE, data)
+    # DB for durability/query:
+    try:
+        remember("preference", key, str(value), session_id=session, source="conversation_manager", confidence=0.9)
+    except Exception as e:
+        logger.warning(f"Failed to persist fact to DB: {e}")
 
-def load_facts(session: str) -> dict:
-    facts = {}
-    turns = load_turns(session)
-    for turn in turns:
-        if turn["role"] == "user_fact":
-            try:
-                fact = json.loads(turn["content"])
-                facts[fact["key"]] = fact["value"]
-            except Exception:
-                continue
-    return facts
+def handle_repl_turn(user_text: str, session: str = "default") -> Dict[str, Any]:
+    """
+    Very small NL handler that extracts a simple 'favorite color' fact
+    (kept only for smoke tests). Real extraction is performed elsewhere.
+    """
+    text = (user_text or "").lower().strip()
+    if "favorite color is" in text:
+        value = text.split("favorite color is", 1)[1].strip().strip(".")
+        save_fact(session, "favorite_color", value)
+        msg = f"Got it — I'll remember your favorite color is {value}."
+    else:
+        msg = "Thanks! I'll note that."
 
-# --- REPL turn integration ---
-
-def _clean_fact(value: str) -> str:
-    return value.strip().strip(string.punctuation)
-
-def handle_repl_turn(
-    current_input: str,
-    history: list[dict] | None = None,
-    session: str = "cortex",
-    limit: int = 10,
-) -> dict:
-    hist = history if history is not None else load_turns(session)
-    trimmed = hist[-limit:] if limit else hist
-    user_msg = {"role": "user", "content": current_input}
-
-    save_turn(session, "user", current_input)
-
-    low = current_input.lower()
-    if "favorite color is" in low:
-        color = current_input.split("favorite color is")[-1]
-        save_fact(session, "favorite_color", _clean_fact(color))
-    if "favorite food is" in low:
-        food = current_input.split("favorite food is")[-1]
-        save_fact(session, "favorite_food", _clean_fact(food))
-
-    messages = trimmed + [user_msg]
-    return {"messages": messages}
-
-
-def record_assistant(session: str, content: str) -> None:
-    save_turn(session, "assistant", content)
-
-def get_history(session: str) -> list[dict]:
-    return load_turns(session)
-
-__all__ = [
-    "handle_repl_turn",
-    "record_assistant",
-    "get_history",
-    "clear_turns",
-    "save_fact",
-    "load_facts",
-]
+    return {"status": "ok", "message": msg}
