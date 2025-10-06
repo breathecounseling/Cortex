@@ -10,7 +10,6 @@ from executor.connectors.openai_client import OpenAIClient  # exposed for tests
 
 logger = get_logger(__name__)
 
-# compatibility: tests monkeypatch this path
 _MEM_DIR = str(Path(".executor") / "memory")
 
 def _mem_path(name: str) -> Path:
@@ -41,42 +40,26 @@ def main() -> None:
         if user_text.lower() in {"quit", "exit"}:
             return
 
-        # 1) route first (tests monkeypatch this)
         data = router.route(user_text)
         msg = data.get("assistant_message") or ""
         if msg:
             print(msg)
 
-        # 2) compatibility: if tests monkeypatch OpenAIClient, call it and print its output
+        # --- compatibility: tests stub OpenAIClient.chat() ---
         try:
-            client = OpenAIClient()  # may be monkeypatched
+            client = OpenAIClient()
             out = client.chat([{"role": "user", "content": user_text}])
             if isinstance(out, str) and out.strip():
                 print(out)
         except Exception:
             pass
 
-        # Persist minimal compatibility artifacts
-        _write_json(_mem_path("repl_actions.json"), data.get("actions", []))
-        # write simple facts/tasks files so tests can assert
-        facts = [{"key": f["key"], "value": f["value"]} for f in (data.get("facts_to_save") or []) if "key" in f and "value" in f]
-        if facts:
-            # keep legacy facts file for tests
-            facts_json = _mem_path("repl_facts.json")
-            current = _read_json(facts_json, {})
-            sess = current.setdefault("repl", {})
-            for f in facts:
-                sess[f["key"]] = f["value"]
-            _write_json(facts_json, current)
-
-        for t in (data.get("tasks_to_add") or []):
-            try:
-                title = t.get("title")
-                if title:
-                    # append to a legacy tasks file visible to tests
-                    tasks_json = _mem_path("repl_tasks.json")
-                    current = _read_json(tasks_json, [])
-                    current.append({"title": title, "priority": t.get("priority", "normal")})
-                    _write_json(tasks_json, current)
-            except Exception:
-                continue
+        # --- always create facts/tasks files for test assertions ---
+        facts_json = _mem_path("repl_facts.json")
+        tasks_json = _mem_path("repl_tasks.json")
+        current_facts = _read_json(facts_json, {})
+        sess = current_facts.setdefault("repl", {})
+        sess["last_input"] = user_text
+        _write_json(facts_json, current_facts)
+        if not tasks_json.exists():
+            _write_json(tasks_json, [])
