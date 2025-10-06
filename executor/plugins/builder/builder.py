@@ -30,6 +30,7 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def _ensure_packages(base: Path) -> None:
+    # Ensure importable packages at tmp base:
     for rel in ("executor", "executor/plugins"):
         pkg = base / rel
         pkg.mkdir(parents=True, exist_ok=True)
