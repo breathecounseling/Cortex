@@ -46,21 +46,25 @@ def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
     plugin_dir = base / "executor" / "plugins" / name
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure all package dirs importable
+    # Make all dirs importable
     for pkg in (plugin_dir.parent.parent.parent, plugin_dir.parent, plugin_dir):
         init_py = pkg / "__init__.py"
         if not init_py.exists():
             init_py.write_text("", encoding="utf-8")
 
-    # Make tmp base importable for tests
+    # tmp base importable
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
-    importlib.invalidate_caches()
 
     specialist_path = plugin_dir / "specialist.py"
     manifest_path = plugin_dir / "plugin.json"
 
     _write_text(specialist_path, TEMPLATE_SPECIALIST.format(name=name, description=description))
+
+    # ✅ create __init__.py inside plugin package that re-exports specialist
+    init_path = plugin_dir / "__init__.py"
+    init_path.write_text("from . import specialist\n", encoding="utf-8")
+
     manifest = {
         "name": name,
         "description": description,
@@ -69,7 +73,6 @@ def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
     }
     _write_json(manifest_path, manifest)
 
-    # ensure caches refreshed after writing new file tree
     importlib.invalidate_caches()
 
     try:
