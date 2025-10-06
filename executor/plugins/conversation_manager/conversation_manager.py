@@ -9,10 +9,12 @@ logger = get_logger(__name__)
 
 _MEM_DIR = str(Path(".executor") / "memory")
 
+
 def _mem_path(name: str) -> Path:
     p = Path(_MEM_DIR)
     p.mkdir(parents=True, exist_ok=True)
     return p / name
+
 
 def _read_json(p: Path) -> Dict[str, Any]:
     if not p.exists():
@@ -22,13 +24,16 @@ def _read_json(p: Path) -> Dict[str, Any]:
     except Exception:
         return {}
 
+
 def _write_json(p: Path, data: Dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+
 def load_facts(session: str) -> Dict[str, Any]:
     data = _read_json(_mem_path("repl_facts.json"))
     return data.get(session, {})
+
 
 def save_fact(session: str, key: str, value: Any) -> None:
     data = _read_json(_mem_path("repl_facts.json"))
@@ -36,28 +41,23 @@ def save_fact(session: str, key: str, value: Any) -> None:
     sess[key] = value
     _write_json(_mem_path("repl_facts.json"), data)
 
+
 def handle_repl_turn(
     user_text: str,
-    *,
     history: List[Dict[str, str]] | None = None,
     session: str = "default",
-    limit: int = 10
+    limit: int = 10,
 ) -> Dict[str, Any]:
-    """
-    Adds simple fact extraction and truncates history for tests.
-    """
+    history = history or []
+    limited = history[-limit:] if history else []
+
     text = (user_text or "").lower().strip()
     if "favorite color is" in text:
-        value = text.split("favorite color is", 1)[1].strip().strip(".")
-        save_fact(session, "favorite_color", value)
-        msg = f"Got it—I’ll remember your favorite color is {value}."
-    elif "favorite food is" in text:
-        value = text.split("favorite food is", 1)[1].strip().strip(".")
-        save_fact(session, "favorite_food", value)
-        msg = f"Got it—I’ll remember your favorite food is {value}."
-    else:
-        msg = "Ok."
+        val = text.split("favorite color is", 1)[1].strip().strip(".")
+        save_fact(session, "favorite_color", val)
+    if "favorite food is" in text:
+        val = text.split("favorite food is", 1)[1].strip().strip(".")
+        save_fact(session, "favorite_food", val)
 
-    history = (history or [])[-limit:]
-    history.append({"role": "assistant", "content": msg})
-    return {"status": "ok", "messages": history, "message": msg}
+    messages = limited + [{"role": "user", "content": user_text}]
+    return {"status": "ok", "messages": messages, "message": user_text}
