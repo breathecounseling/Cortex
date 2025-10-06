@@ -1,49 +1,18 @@
-# executor/plugins/patcher_utils.py
 from __future__ import annotations
-import subprocess
-import tempfile
-import os
-from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
-@dataclass
-class TestResult:
-    success: bool
-    report: str
+from executor.audit.logger import get_logger
+from executor.utils.memory import record_repair
 
-class WorkingDir:
-    def __init__(self, ci: bool = False):
-        self.path = tempfile.mkdtemp(prefix="executor_edit_")
-        self._ci = ci
+logger = get_logger(__name__)
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        # Keep artifacts for inspection; caller can clean up if desired.
-        pass
-
-    def commit_and_merge(self, message: str) -> bool:
-        # Stub: wire into your real VCS if needed
-        return True
-
-def run_tests(*, workdir: str, select: list[str] | None = None) -> TestResult:
-    cmd = ["pytest", "-q", "--maxfail=1", "--disable-warnings"]
-    if select:
-        cmd.extend(select)
-
-    # Ensure PYTHONPATH points to the repo root so "executor" is always importable
-    env = os.environ.copy()
-    repo_root = os.path.abspath(os.path.join(workdir, ".."))
-    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
-
-    try:
-        out = subprocess.check_output(
-            cmd,
-            cwd=workdir,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-        )
-        return TestResult(True, out)
-    except subprocess.CalledProcessError as e:
-        return TestResult(False, e.output)
+def write_patch(target: Path, new_content: str, *, summary: str = "") -> None:
+    """
+    Overwrite a file with new content (utf-8) and record a repair summary.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(new_content, encoding="utf-8")
+    if summary:
+        record_repair(file=str(target), error="patched", fix_summary=summary, success=True)
+    logger.info(f"Patched file: {target}")
