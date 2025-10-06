@@ -31,9 +31,7 @@ class Docket:
         return t
 
     def list(self, status: Optional[str] = None) -> List[Task]:
-        if status:
-            return [t for t in self._items if t.status == status]
-        return list(self._items)
+        return [t for t in self._items if not status or t.status == status]
 
     def list_tasks(self) -> List[Dict[str, Any]]:
         return [t.__dict__ for t in self._items]
@@ -41,9 +39,12 @@ class Docket:
     def complete(self, title: str) -> bool:
         for t in self._items:
             if t.title == title:
+                # Adjust approved [idea] tasks
                 if t.title.startswith("[idea] "):
                     t.title = t.title.replace("[idea] ", "", 1)
-                t.status = "done"
+                    t.status = "todo"
+                else:
+                    t.status = "done"
                 remember("system", "task_completed", title, source="docket", confidence=1.0)
                 logger.info(f"Docket complete: {title}")
                 return True
