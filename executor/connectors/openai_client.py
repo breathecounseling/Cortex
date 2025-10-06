@@ -1,94 +1,46 @@
-# executor/connectors/openai_client.py
 from __future__ import annotations
+from typing import List, Dict, Any, Optional
 import os
-from typing import Optional, Dict, Any, List
 
+from executor.audit.logger import get_logger
+from executor.utils.config import get_config
 from dotenv import load_dotenv
+
+# External: openai library (you already have it in requirements)
 from openai import OpenAI
 
-from executor.utils.error_handler import ExecutorError
-
-# Load .env from project root
+logger = get_logger(__name__)
 load_dotenv()
 
 class OpenAIClient:
-    def __init__(self, model: str = "gpt-4o-mini"):
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY not found in environment")
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
+    """
+    Thin wrapper around OpenAI chat completions.
+    Preserves the existing interface used by tests:
+      - __init__(model: str | None = None)
+      - chat(messages: List[Dict[str, str]]) -> str
+    """
+    def __init__(self, model: Optional[str] = None):
+        cfg = get_config()
+        self.api_key = cfg["OPENAI_API_KEY"] or os.getenv("OPENAI_API_KEY", "")
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is missing")
+        self.model = model or cfg["ROUTER_MODEL"]
+        self._client = OpenAI(api_key=self.api_key)
+        logger.debug(f"OpenAIClient initialized with model={self.model}")
 
-    def chat(
-        self,
-        messages: List[Dict[str, str]],
-        response_format: Optional[Dict[str, str]] = None,
-    ) -> str:
+    def chat(self, messages: List[Dict[str, str]], **kwargs: Any) -> str:
         """
-        Low-level chat call to OpenAI API.
-        Returns assistant content as a string.
+        Expected to return the assistant text content.
         """
-        response = self.client.chat.completions.create(
+        logger.debug("OpenAIClient.chat called", extra={"message_count": len(messages)})
+        resp = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
-            response_format=response_format or {"type": "text"},
+            **kwargs,
         )
-        return response.choices[0].message.content or ""
-
-    def generate_structured(
-        self,
-        *,
-        system: str,
-        user: str,
-        attachments: Optional[List[str]] = None,
-        max_retries: int = 2,
-    ) -> str:
-        """
-        Ask the model to return JSON conforming to a schema-like contract.
-        Retries if empty/malformed output.
-        """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
-
-        # Attach code files for context if provided
-        if attachments:
-            for path in attachments:
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        code = f.read()
-                    messages.append(
-                        {"role": "user", "content": f"<FILE path='{path}'>\n{code}\n</FILE>"}
-                    )
-                except Exception:
-                    continue
-
-        # Add user request
-        messages.append({"role": "user", "content": user})
-
-        # Strong instruction to enforce JSON
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "Return ONLY JSON with keys: rationale, changelog, files[]. "
-                    "Each files[] item must include path, content, kind ('code'|'test'|'doc'). "
-                    "Never return prose outside JSON."
-                ),
-            }
-        )
-
-        for attempt in range(max_retries + 1):
-            out = self.chat(messages, response_format={"type": "json_object"})
-            if out and out.strip().startswith("{"):
-                return out
-            # Retry with stronger guard
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "Previous output was invalid. You MUST return valid JSON now, "
-                        "with at least one non-empty file under 'files'."
-                    ),
-                }
-            )
-
-        raise ExecutorError("empty_model_output", details={"why": "exhausted retries"})
+        # Cope with both message.content (str) and array content
+        msg = resp.choices[0].message
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
+        return content or ""
