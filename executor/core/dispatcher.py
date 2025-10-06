@@ -1,32 +1,44 @@
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Any, Dict
 
 from executor.audit.logger import get_logger
-from .registry import Registry
+from executor.core.registry import Registry
 
 logger = get_logger(__name__)
 
 class Dispatcher:
     """
-    Simple dispatcher that calls specialist.handle(payload) if can_handle matches.
+    Routes a single action dict to its corresponding specialist and executes it.
     """
-    def __init__(self, registry: Registry | None = None):
+
+    def __init__(self, registry: Registry | None = None) -> None:
         self.registry = registry or Registry()
 
-    def dispatch(self, capability: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        specialist = self.registry.get_specialist_for(capability)
-        if not specialist:
-            msg = f"No specialist found for capability '{capability}'"
-            logger.warning(msg)
-            return {"status": "error", "message": msg}
+    def dispatch(self, action: Dict[str, Any], payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        """
+        Dispatch an action to the appropriate specialist.
+        Tests call with one positional argument (the action dict),
+        but payload is accepted for future expansion.
+        """
+        try:
+            plugin = action.get("plugin")
+            if not plugin:
+                return {"status": "error", "message": "Missing plugin in action."}
 
-        if hasattr(specialist, "can_handle") and not specialist.can_handle(capability):
-            logger.debug(f"Specialist refuses capability '{capability}'")
-            return {"status": "skip", "message": "Specialist declined"}
+            specialist = self.registry.get_specialist(plugin)
+            if not specialist:
+                return {"status": "error", "message": f"No specialist found for {plugin}"}
 
-        if not hasattr(specialist, "handle"):
-            msg = f"Specialist missing 'handle' for capability '{capability}'"
-            logger.error(msg)
-            return {"status": "error", "message": msg}
+            handler = getattr(specialist, "handle", None)
+            if not callable(handler):
+                return {"status": "error", "message": f"Specialist {plugin} has no handle()"}
 
-        return specialist.handle(payload or {})
+            args = action.get("args", {})
+            result = handler(args if payload is None else payload)
+            if not isinstance(result, dict):
+                return {"status": "error", "message": "Handler did not return dict"}
+            logger.info(f"Dispatched action for plugin {plugin}")
+            return result
+        except Exception as e:
+            logger.exception(f"Dispatcher error: {e}")
+            return {"status": "error", "message": str(e)}
