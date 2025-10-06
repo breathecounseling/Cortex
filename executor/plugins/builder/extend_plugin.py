@@ -5,6 +5,7 @@ from typing import Optional
 
 from executor.audit.logger import get_logger
 from executor.utils.memory import remember, init_db_if_needed
+from . import builder as _builder
 
 logger = get_logger(__name__)
 
@@ -17,27 +18,27 @@ def _write_json(p: Path, data: dict) -> None:
 
 def extend_plugin(plugin_name: str, instruction: str, base_dir: Optional[Path] = None) -> dict:
     """
-    Extends an existing plugin:
-      - ensures plugin.json has 'specialist'
-      - records the extension request in memory
-    Returns the updated manifest dict.
+    Ensure plugin exists, manifest has specialist, and record the extension.
+    Returns a dict with at least {"status": "ok", "manifest": {…}} for tests.
     """
     init_db_if_needed()
     base = base_dir or Path.cwd()
-    manifest_path = base / "executor" / "plugins" / plugin_name / "plugin.json"
+    plugin_dir = base / "executor" / "plugins" / plugin_name
+    manifest_path = plugin_dir / "plugin.json"
+
     if not manifest_path.exists():
-        raise FileNotFoundError(f"plugin.json missing for plugin '{plugin_name}'")
+        # scaffold missing plugin minimally
+        _builder.main(plugin_name, f"Specialist for {plugin_name}", base_dir=base)
 
     data = _read_json(manifest_path)
     if not data.get("specialist"):
         data["specialist"] = f"executor.plugins.{plugin_name}.specialist"
+        _write_json(manifest_path, data)
 
-    # Optionally record the extension request for audit/learning
     try:
         remember("system", "plugin_extended", f"{plugin_name}:{instruction}", source="builder")
     except Exception as e:
         logger.warning(f"Failed to remember extension: {e}")
 
-    _write_json(manifest_path, data)
     logger.info(f"🔧 Extended plugin '{plugin_name}' with instruction: {instruction}")
-    return data
+    return {"status": "ok", "manifest": data}
