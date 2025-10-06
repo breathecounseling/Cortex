@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import json
+import sys
 from typing import Optional
 
 from executor.audit.logger import get_logger
@@ -30,11 +31,7 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def _ensure_packages(base: Path) -> None:
-    """
-    Ensure every package level in the tmp base is importable:
-      <base>/executor/__init__.py
-      <base>/executor/plugins/__init__.py
-    """
+    """Ensure executor and executor/plugins exist and are importable."""
     for rel in ("executor", "executor/plugins"):
         pkg = base / rel
         pkg.mkdir(parents=True, exist_ok=True)
@@ -44,7 +41,7 @@ def _ensure_packages(base: Path) -> None:
 
 def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
     """
-    Scaffold a new plugin with manifest + specialist and make it importable.
+    Scaffold a new plugin with manifest + specialist and make it importable immediately.
     """
     init_db_if_needed()
     ensure_dirs()
@@ -55,17 +52,20 @@ def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
     plugin_dir = base / "executor" / "plugins" / name
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
-    # every package layer must be importable
+    # Create __init__.py in all package dirs
     for pkg in (plugin_dir.parent.parent.parent, plugin_dir.parent, plugin_dir):
         init_py = pkg / "__init__.py"
         if not init_py.exists():
             init_py.write_text("", encoding="utf-8")
 
+    # --- NEW: ensure temporary base is on sys.path so imports work in tests ---
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
     specialist_path = plugin_dir / "specialist.py"
     manifest_path = plugin_dir / "plugin.json"
 
     _write_text(specialist_path, TEMPLATE_SPECIALIST.format(name=name, description=description))
-
     manifest = {
         "name": name,
         "description": description,
