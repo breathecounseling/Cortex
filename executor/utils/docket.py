@@ -41,6 +41,8 @@ class Docket:
     def complete(self, title: str) -> bool:
         for t in self._items:
             if t.title == title:
+                if t.title.startswith("[idea] "):
+                    t.title = t.title.replace("[idea] ", "", 1)
                 t.status = "done"
                 remember("system", "task_completed", title, source="docket", confidence=1.0)
                 logger.info(f"Docket complete: {title}")
@@ -52,15 +54,5 @@ class Docket:
             if t.title == title:
                 self._items.pop(i)
                 logger.info(f"Docket remove: {title}")
-                return True
-        return False
-
-    # NEW: used when approving/rejecting "[idea]" tasks in tests
-    def approve(self, title: str) -> bool:
-        for t in self._items:
-            if t.title == title:
-                t.status = "todo"
-                if t.title.startswith("[idea] "):
-                    t.title = t.title.replace("[idea] ", "", 1)
                 return True
         return False
