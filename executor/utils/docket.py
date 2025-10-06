@@ -7,16 +7,19 @@ from executor.utils.memory import init_db_if_needed, remember
 
 logger = get_logger(__name__)
 
+
 @dataclass
 class Task:
     title: str
     status: str = "pending"
     meta: Dict[str, Any] = field(default_factory=dict)
 
+
 class Docket:
-    def __init__(self) -> None:
+    def __init__(self, namespace: Optional[str] = None) -> None:
         initialize_logging()
         init_db_if_needed()
+        self.namespace = namespace
         self._items: List[Task] = []
 
     def add(self, title: str, **meta: Any) -> Task:
