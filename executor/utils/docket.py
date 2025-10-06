@@ -1,86 +1,49 @@
 from __future__ import annotations
-import os
-import json
-import uuid
-from datetime import datetime
-from typing import List, Dict, Any
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
 
+from executor.audit.logger import get_logger, initialize_logging
+from executor.utils.memory import init_db_if_needed, remember
+
+logger = get_logger(__name__)
+
+@dataclass
+class Task:
+    title: str
+    status: str = "pending"
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 class Docket:
-    """
-    Tiny persistent task docket for prerequisites/steps the model proposes.
-    Stored at .executor/memory/<namespace>_docket.json
-    """
+    def __init__(self) -> None:
+        initialize_logging()
+        init_db_if_needed()
+        self._items: List[Task] = []
 
-    def __init__(self, namespace: str = "repl"):
-        self.namespace = namespace
-        self._dir = os.path.join(".executor", "memory")
-        os.makedirs(self._dir, exist_ok=True)
-        self._path = os.path.join(self._dir, f"{namespace}_docket.json")
-        self._data: Dict[str, Any] = {"tasks": []}
-        self._load()
+    def add(self, title: str, **meta: Any) -> Task:
+        t = Task(title=title, meta=meta)
+        self._items.append(t)
+        remember("system", "task_added", title, source="docket", confidence=1.0)
+        logger.info(f"Docket add: {title}")
+        return t
 
-    def _load(self) -> None:
-        if os.path.exists(self._path):
-            try:
-                with open(self._path, "r", encoding="utf-8") as f:
-                    self._data = json.load(f)
-            except Exception:
-                self._data = {"tasks": []}
+    def list(self, status: Optional[str] = None) -> List[Task]:
+        if status:
+            return [t for t in self._items if t.status == status]
+        return list(self._items)
 
-    def _save(self) -> None:
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2)
-
-    def list_tasks(self) -> List[Dict[str, Any]]:
-        self._load()  # reload from disk
-        return list(self._data.get("tasks", []))
-
-    def add(self, title: str, priority: str = "normal") -> str:
-        tid = uuid.uuid4().hex[:8]
-        task = {
-            "id": tid,
-            "title": title,
-            "priority": priority if priority in {"low", "normal", "high"} else "normal",
-            "status": "todo",
-            "created": datetime.utcnow().isoformat(),
-        }
-        self._data.setdefault("tasks", []).append(task)
-        self._save()
-        return tid
-
-    def complete(self, task_id: str) -> bool:
-        for t in self._data.get("tasks", []):
-            if t["id"] == task_id:
-                t["status"] = "done"
-                self._save()
+    def complete(self, title: str) -> bool:
+        for t in self._items:
+            if t.title == title:
+                t.status = "done"
+                remember("system", "task_completed", title, source="docket", confidence=1.0)
+                logger.info(f"Docket complete: {title}")
                 return True
         return False
 
-    def clear_done(self) -> int:
-        before = len(self._data.get("tasks", []))
-        self._data["tasks"] = [t for t in self._data.get("tasks", []) if t.get("status") != "done"]
-        self._save()
-        return before - len(self._data["tasks"])
-
-    def update(self, task_id: str, **updates) -> bool:
-        """
-        Update fields of a task by id. Example:
-          docket.update(tid, title="New Title", status="todo")
-        Returns True if updated, False if not found.
-        """
-        for t in self._data.get("tasks", []):
-            if t["id"] == task_id:
-                t.update(updates)
-                self._save()
+    def remove(self, title: str) -> bool:
+        for i, t in enumerate(self._items):
+            if t.title == title:
+                self._items.pop(i)
+                logger.info(f"Docket remove: {title}")
                 return True
         return False
-
-    def remove(self, task_id: str) -> bool:
-        """
-        Remove a task by id. Returns True if removed, False if not found.
-        """
-        before = len(self._data.get("tasks", []))
-        self._data["tasks"] = [t for t in self._data.get("tasks", []) if t.get("id") != task_id]
-        self._save()
-        return len(self._data["tasks"]) < before
