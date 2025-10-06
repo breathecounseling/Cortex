@@ -84,10 +84,19 @@ def _exec_script(conn: sqlite3.Connection, sql_text: str) -> None:
     conn.executescript(sql_text)
     conn.commit()
 
+def _facts_table_exists(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='facts'"
+        ).fetchone()
+        return bool(row)
+    except sqlite3.Error:
+        return False
+
 def init_db_if_needed() -> None:
     """
     Ensure memory DB exists and schema is initialized.
-    If schema file is missing (e.g., tmp test dirs), use embedded SQL.
+    If schema file is missing OR DB exists but has no tables, use embedded schema.
     """
     global _initialized
     if _initialized:
@@ -98,7 +107,15 @@ def init_db_if_needed() -> None:
     schema_path = Path(cfg["SCHEMA_INIT_SQL"])
 
     with _conn_lock, _connect() as conn:
+        need_bootstrap = False
         if not db.exists():
+            need_bootstrap = True
+        else:
+            # DB file exists — ensure required tables exist
+            if not _facts_table_exists(conn):
+                need_bootstrap = True
+
+        if need_bootstrap:
             if schema_path.exists():
                 _exec_script(conn, schema_path.read_text(encoding="utf-8"))
                 log.info(f"Initialized memory DB from schema: {schema_path}")
@@ -111,7 +128,8 @@ def _append_jsonl(record: Dict[str, Any]) -> None:
     cfg = get_config()
     path = Path(cfg["MEMORY_LOG_JSONL"])
     line = json.dumps(record, ensure_ascii=False)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True
+    )
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
 
