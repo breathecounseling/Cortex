@@ -2,6 +2,8 @@ from __future__ import annotations
 from importlib import import_module
 from pathlib import Path
 import json
+import sys
+import importlib
 from typing import Dict, Optional, Set
 
 from executor.audit.logger import get_logger
@@ -10,23 +12,13 @@ from executor.utils.memory import init_db_if_needed
 
 logger = get_logger(__name__)
 
-
 class Registry:
-    """
-    Plugin registry that discovers manifests under executor/plugins and provides
-    capability -> specialist module mapping. Compatible with legacy test helpers.
-    """
-
     def __init__(self, root: Optional[Path] = None, base: Optional[str] = None):
         ensure_dirs()
         init_db_if_needed()
         self.root = Path(base) if base else (root or Path.cwd())
-        # The tests sometimes pass base=<tmp>/executor/plugins; handle both cases.
-        if (self.root / "executor" / "plugins").exists():
-            self.plugins_dir = self.root / "executor" / "plugins"
-        else:
-            self.plugins_dir = self.root
-
+        # If a project root was provided, look in executor/plugins under it; else treat provided base as plugins dir.
+        self.plugins_dir = self.root / "executor" / "plugins" if (self.root / "executor" / "plugins").exists() else self.root
         self._capabilities: Dict[str, str] = {}
         self._plugin_names: Set[str] = set()
         self._specialists: Dict[str, object] = {}
@@ -52,28 +44,49 @@ class Registry:
             except Exception:
                 continue
 
+    def _ensure_tmp_import_visibility(self) -> None:
+        """
+        Ensure that the dynamic tmp plugins dir is importable as 'executor.plugins.*':
+        - sys.path contains the tmp base (plugins_dir/../../)
+        - executor.__path__ includes that base's 'executor' folder
+        - import caches are invalidated
+        """
+        base = self.plugins_dir.parent.parent  # .../executor/plugins -> tmp base
+        if str(base) not in sys.path:
+            sys.path.insert(0, str(base))
+        try:
+            import executor as _exec  # if executor already imported, extend its search path
+            pkg_path = str(base / "executor")
+            if hasattr(_exec, "__path__") and pkg_path not in _exec.__path__:
+                _exec.__path__.append(pkg_path)
+        except Exception:
+            # If executor not imported yet, normal import will find it via sys.path
+            pass
+        importlib.invalidate_caches()
+
     def get_specialist_for(self, capability: str):
         mod_path = self._capabilities.get(capability)
         if not mod_path:
             return None
         if mod_path not in self._specialists:
-            self._specialists[mod_path] = import_module(mod_path)
+            try:
+                self._specialists[mod_path] = import_module(mod_path)
+            except ModuleNotFoundError:
+                # Fallback: make the tmp-scaffolded package visible and retry
+                self._ensure_tmp_import_visibility()
+                self._specialists[mod_path] = import_module(mod_path)
         return self._specialists[mod_path]
-
-    # -------- Legacy helpers used in tests --------
-    def has_plugin(self, name: str) -> bool:
-        # Either we saw the plugin name in manifest["name"] or a capability equals the name
-        return (name in self._plugin_names) or (name in self._capabilities)
-
-    def get_specialist(self, name: str):
-        # Tests call this expecting a specialist object by plugin/capability name
-        return self.get_specialist_for(name)
-
-    # ----------------------------------------------
 
     def capabilities(self):
         return sorted(self._capabilities.keys())
 
+    # compatibility expected by tests
+    def has_plugin(self, name: str) -> bool:
+        return (name in self._plugin_names) or (name in self._capabilities)
+
+    # compatibility helper used by tests
+    def get_specialist(self, name: str):
+        return self.get_specialist_for(name)
 
 # compatibility alias
 SpecialistRegistry = Registry
