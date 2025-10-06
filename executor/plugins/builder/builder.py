@@ -30,15 +30,22 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def _ensure_packages(base: Path) -> None:
-    # Ensure importable packages at tmp base:
+    """
+    Ensure every package level in the tmp base is importable:
+      <base>/executor/__init__.py
+      <base>/executor/plugins/__init__.py
+    """
     for rel in ("executor", "executor/plugins"):
         pkg = base / rel
         pkg.mkdir(parents=True, exist_ok=True)
-        init = pkg / "__init__.py"
-        if not init.exists():
-            init.write_text("", encoding="utf-8")
+        init_file = pkg / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text("", encoding="utf-8")
 
 def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
+    """
+    Scaffold a new plugin with manifest + specialist and make it importable.
+    """
     init_db_if_needed()
     ensure_dirs()
 
@@ -47,7 +54,12 @@ def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
 
     plugin_dir = base / "executor" / "plugins" / name
     plugin_dir.mkdir(parents=True, exist_ok=True)
-    (plugin_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    # every package layer must be importable
+    for pkg in (plugin_dir.parent.parent.parent, plugin_dir.parent, plugin_dir):
+        init_py = pkg / "__init__.py"
+        if not init_py.exists():
+            init_py.write_text("", encoding="utf-8")
 
     specialist_path = plugin_dir / "specialist.py"
     manifest_path = plugin_dir / "plugin.json"
