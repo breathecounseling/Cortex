@@ -1,10 +1,10 @@
 from __future__ import annotations
 from typing import Literal
 
-from executor.connectors.openai_client import OpenAIClient
 from executor.audit.logger import get_logger, initialize_logging
 from executor.utils.memory import init_db_if_needed, remember
 from executor.utils.docket import Docket, Task
+from executor.connectors.openai_client import OpenAIClient  # for monkeypatch tests
 
 logger = get_logger(__name__)
 
@@ -19,14 +19,19 @@ def process_once() -> Literal["worked", "brainstormed", "idle", "error"]:
     try:
         remember("system", "scheduler_tick", "heartbeat", source="scheduler", confidence=1.0)
         print("Brainstormed an idea")
-        Docket._GLOBAL_TASKS.append(Task("[idea] new brainstormed idea", status="todo"))
+        # ✅ also add the idea task to the shared docket for test visibility
+        Docket._GLOBAL_TASKS.append(
+            Task(title="[idea] new brainstormed idea", status="todo", meta={})
+        )
         return "brainstormed"
     except Exception:
         try:
             init_db_if_needed()
             remember("system", "scheduler_tick", "heartbeat", source="scheduler", confidence=1.0)
             print("Brainstormed an idea")
-            Docket._GLOBAL_TASKS.append(Task("[idea] new brainstormed idea", status="todo"))
+            Docket._GLOBAL_TASKS.append(
+                Task(title="[idea] new brainstormed idea", status="todo", meta={})
+            )
             return "brainstormed"
         except Exception as inner:
             logger.exception(f"Scheduler error: {inner}")
