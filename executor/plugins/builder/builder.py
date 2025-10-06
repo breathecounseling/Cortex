@@ -1,8 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-import json
-import sys
-import importlib
+import json, sys, importlib
 from typing import Optional
 
 from executor.audit.logger import get_logger
@@ -32,34 +30,29 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def _ensure_packages(base: Path) -> None:
-    """Ensure executor and executor/plugins exist and are importable."""
     for rel in ("executor", "executor/plugins"):
         pkg = base / rel
         pkg.mkdir(parents=True, exist_ok=True)
-        init_file = pkg / "__init__.py"
-        if not init_file.exists():
-            init_file.write_text("", encoding="utf-8")
+        init_py = pkg / "__init__.py"
+        if not init_py.exists():
+            init_py.write_text("", encoding="utf-8")
 
 def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
-    """
-    Scaffold a new plugin with manifest + specialist and make it importable immediately.
-    """
     init_db_if_needed()
     ensure_dirs()
-
     base = base_dir or Path.cwd()
     _ensure_packages(base)
 
     plugin_dir = base / "executor" / "plugins" / name
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create __init__.py in all package dirs
+    # Ensure all package dirs importable
     for pkg in (plugin_dir.parent.parent.parent, plugin_dir.parent, plugin_dir):
         init_py = pkg / "__init__.py"
         if not init_py.exists():
             init_py.write_text("", encoding="utf-8")
 
-    # --- ensure temporary base is importable in pytest tmp dirs ---
+    # Make tmp base importable for tests
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
     importlib.invalidate_caches()
@@ -75,6 +68,9 @@ def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
         "specialist": f"executor.plugins.{name}.specialist",
     }
     _write_json(manifest_path, manifest)
+
+    # ensure caches refreshed after writing new file tree
+    importlib.invalidate_caches()
 
     try:
         remember("system", "plugin_created", name, source="builder", confidence=1.0)
