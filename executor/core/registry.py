@@ -12,12 +12,10 @@ logger = get_logger(__name__)
 
 class Registry:
     """
-    Discovers and loads plugin specialists from 'executor/plugins/**/plugin.json'.
-    Maintains capability -> specialist module mapping.
+    Discovers and loads plugin specialists.
     """
 
     def __init__(self, root: Optional[Path] = None, base: Optional[str] = None):
-        # compatibility: tests may pass base= instead of root=
         ensure_dirs()
         init_db_if_needed()
         self.root = Path(base) if base else (root or Path.cwd())
@@ -30,7 +28,6 @@ class Registry:
         self._specialists.clear()
         plugins_dir = self.root / "executor" / "plugins"
         if not plugins_dir.exists():
-            logger.debug("No plugins directory found; skipping registry refresh")
             return
         for manifest_path in plugins_dir.rglob("plugin.json"):
             try:
@@ -41,7 +38,7 @@ class Registry:
                     for cap in caps:
                         self._capabilities[cap] = spec_path
             except Exception as e:
-                logger.error(f"Failed to read manifest {manifest_path}: {e}")
+                logger.error(f"Manifest read failed {manifest_path}: {e}")
 
     def get_specialist_for(self, capability: str):
         mod_path = self._capabilities.get(capability)
@@ -54,5 +51,8 @@ class Registry:
     def capabilities(self):
         return sorted(self._capabilities.keys())
 
-# compatibility alias for older tests
+    # legacy test helper
+    def has_plugin(self, name: str) -> bool:
+        return any(name in v for v in self._capabilities.values())
+
 SpecialistRegistry = Registry
