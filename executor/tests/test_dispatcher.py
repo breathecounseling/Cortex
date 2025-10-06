@@ -45,3 +45,6 @@ def test_dispatcher_with_scaffolded_specialist(tmp_path):
         assert result["status"] in {"ok", "error", "skipped"}
     finally:
         os.chdir(old_cwd)
+
+SpecialistRegistry = Registry
+
