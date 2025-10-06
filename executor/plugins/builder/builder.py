@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import sys
+import importlib
 from typing import Optional
 
 from executor.audit.logger import get_logger
@@ -31,7 +32,6 @@ def _write_json(p: Path, data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def _ensure_packages(base: Path) -> None:
-    """Ensure executor and executor/plugins exist and are importable."""
     for rel in ("executor", "executor/plugins"):
         pkg = base / rel
         pkg.mkdir(parents=True, exist_ok=True)
@@ -52,15 +52,16 @@ def main(name: str, description: str, base_dir: Optional[Path] = None) -> Path:
     plugin_dir = base / "executor" / "plugins" / name
     plugin_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create __init__.py in all package dirs
+    # Ensure __init__.py everywhere
     for pkg in (plugin_dir.parent.parent.parent, plugin_dir.parent, plugin_dir):
         init_py = pkg / "__init__.py"
         if not init_py.exists():
             init_py.write_text("", encoding="utf-8")
 
-    # --- NEW: ensure temporary base is on sys.path so imports work in tests ---
+    # Make temp plugin importable
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
+    importlib.invalidate_caches()
 
     specialist_path = plugin_dir / "specialist.py"
     manifest_path = plugin_dir / "plugin.json"
