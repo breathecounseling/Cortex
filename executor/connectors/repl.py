@@ -6,6 +6,8 @@ import json
 from executor.audit.logger import get_logger, initialize_logging
 from executor.utils.memory import init_db_if_needed
 from executor.core import router
+# expose for tests to monkeypatch
+from executor.connectors.openai_client import OpenAIClient  # noqa: F401
 
 logger = get_logger(__name__)
 
@@ -43,7 +45,5 @@ def main() -> None:
         data = router.route(user_text)
         msg = data.get("assistant_message") or ""
         if msg:
-            # tests expect visible output
-            print(msg)
-        # Persist minimal compatibility artifacts
+            print(msg)  # tests expect visible output
         _write_json(_mem_path("repl_actions.json"), data.get("actions", []))
