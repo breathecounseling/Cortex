@@ -46,5 +46,5 @@ def test_dispatcher_with_scaffolded_specialist(tmp_path):
     finally:
         os.chdir(old_cwd)
 
-SpecialistRegistry = Registry
+
 
