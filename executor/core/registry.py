@@ -1,78 +1,57 @@
-import os
-import sys
+from __future__ import annotations
+from importlib import import_module
+from pathlib import Path
 import json
-import importlib
-from typing import Dict, Any
+from typing import Dict, Callable, Optional
 
+from executor.audit.logger import get_logger
+from executor.utils.config import ensure_dirs
+from executor.utils.memory import init_db_if_needed
 
-class SpecialistRegistry:
-    def __init__(self, base: str = os.path.join("executor", "plugins")) -> None:
-        self.base = base
-        self.plugins: Dict[str, Any] = {}
-        # Auto-load plugins on construction
+logger = get_logger(__name__)
+
+class Registry:
+    """
+    Discovers and loads plugin specialists from 'executor/plugins/**/plugin.json'.
+    Maintains a mapping of capability -> specialist module path.
+    """
+    def __init__(self, root: Optional[Path] = None):
+        ensure_dirs()
+        init_db_if_needed()
+        self.root = root or Path.cwd()
+        self._capabilities: Dict[str, str] = {}
+        self._specialists: Dict[str, object] = {}
         self.refresh()
 
     def refresh(self) -> None:
-        """Reload all specialists from plugin manifests in self.base."""
-        self.plugins.clear()
-
-        # Ensure parent of executor is importable (repo root or pytest tmp dir)
-        abs_executor_parent = os.path.abspath(os.path.join(self.base, "..", ".."))
-        if abs_executor_parent not in sys.path:
-            sys.path.insert(0, abs_executor_parent)
-
-        # ✅ Clear caches and drop all executor-related modules
-        importlib.invalidate_caches()
-        for mod in list(sys.modules.keys()):
-            if mod == "executor" or mod.startswith("executor."):
-                sys.modules.pop(mod)
-
-        if not os.path.isdir(self.base):
+        self._capabilities.clear()
+        self._specialists.clear()
+        plugins_dir = self.root / "executor" / "plugins"
+        if not plugins_dir.exists():
+            logger.info("No plugins directory found; skipping registry refresh")
             return
-
-        for entry in os.listdir(self.base):
-            plugin_dir = os.path.join(self.base, entry)
-            if not os.path.isdir(plugin_dir):
-                continue
-
-            # Prefer plugin.json (tests & extend_plugin write this),
-            # fall back to manifest.json for compatibility.
-            manifest_path = os.path.join(plugin_dir, "plugin.json")
-            if not os.path.exists(manifest_path):
-                alt = os.path.join(plugin_dir, "manifest.json")
-                manifest_path = alt if os.path.exists(alt) else None
-
-            if not manifest_path:
-                continue
-
+        for manifest_path in plugins_dir.rglob("plugin.json"):
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
+                data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                caps = data.get("capabilities", [])
+                spec_path = data.get("specialist")
+                if caps and spec_path:
+                    for cap in caps:
+                        self._capabilities[cap] = spec_path
+                else:
+                    logger.warning(f"Manifest missing fields: {manifest_path}")
             except Exception as e:
-                print(f"[Registry] Failed to read manifest for {entry}: {e}")
-                continue
+                logger.error(f"Failed to read manifest {manifest_path}: {e}")
 
-            # Resolve specialist module path
-            modname = manifest.get("specialist") or f"executor.plugins.{entry}.specialist"
+        logger.debug(f"Registry loaded {len(self._capabilities)} capabilities")
 
-            try:
-                module = importlib.import_module(modname)
-                self.plugins[entry] = module
-            except Exception as e:
-                print(f"[Registry] Failed to import {modname}: {e}")
+    def get_specialist_for(self, capability: str):
+        mod_path = self._capabilities.get(capability)
+        if not mod_path:
+            return None
+        if mod_path not in self._specialists:
+            self._specialists[mod_path] = import_module(mod_path)
+        return self._specialists[mod_path]
 
-    def get(self, name: str):
-        """Return the specialist module for a given plugin name."""
-        return self.plugins.get(name)
-
-    def get_specialist(self, name: str):
-        """Alias for get(): return the specialist module for a given plugin name."""
-        return self.plugins.get(name)
-
-    def all(self):
-        """Return a list of all loaded specialist modules."""
-        return list(self.plugins.values())
-
-    def has_plugin(self, name: str) -> bool:
-        """Return True if the registry has a specialist loaded for this name."""
-        return name in self.plugins
+    def capabilities(self):
+        return sorted(self._capabilities.keys())
