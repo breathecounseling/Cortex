@@ -1,115 +1,46 @@
-"""
-OpenAI Responses API connector for Executor.
-Registers Builder and Extender as tools and provides ask_executor().
-"""
-
+from __future__ import annotations
+from typing import List, Dict, Any, Optional
 import os
-import json
+
+from executor.audit.logger import get_logger
+from executor.utils.config import get_config
 from dotenv import load_dotenv
+
+# External: openai library (you already have it in requirements)
 from openai import OpenAI
 
-# Load .env from repo root
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "../../.env"))
+logger = get_logger(__name__)
+load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY missing from .env")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# Import Builder and Extender
-from executor.plugins.builder import builder, extend_plugin
-
-# Tool registry
-TOOLS = [
-    {
-        "type": "function",
-        "name": "build_plugin",
-        "description": "Create a new Executor plugin.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {"type": "string"},
-                "purpose": {"type": "string"}
-            },
-            "required": ["plugin_name", "purpose"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "extend_plugin",
-        "description": "Extend an existing Executor plugin with a new feature.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plugin_name": {"type": "string"},
-                "new_feature": {"type": "string"}
-            },
-            "required": ["plugin_name", "new_feature"]
-        }
-    }
-]
-
-SYSTEM_INSTRUCTIONS = (
-    "You are Cortex Executor, an AI system that writes and edits plugins. "
-    "If the user request is vague, ask clarifying questions. "
-    "When calling tools, provide the correct parameters. "
-    "When fixing code, preserve all working functions and only fix broken ones. "
-    "When outputting code, return ONLY the complete corrected file."
-)
-
-def ask_executor(prompt: str, thread_id: str = "default"):
+class OpenAIClient:
     """
-    High-level interface to the OpenAI Responses API.
-    Routes natural language input to freeform responses or tool calls.
+    Thin wrapper around OpenAI chat completions.
+    Preserves the existing interface used by tests:
+      - __init__(model: str | None = None)
+      - chat(messages: List[Dict[str, str]]) -> str
     """
-    response = client.responses.create(
-        model="gpt-5",
-        instructions=SYSTEM_INSTRUCTIONS,
-        input=prompt,
-        tools=TOOLS,
-        store=False
-    )
+    def __init__(self, model: Optional[str] = None):
+        cfg = get_config()
+        self.api_key = cfg["OPENAI_API_KEY"] or os.getenv("OPENAI_API_KEY", "")
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is missing")
+        self.model = model or cfg["ROUTER_MODEL"]
+        self._client = OpenAI(api_key=self.api_key)
+        logger.debug(f"OpenAIClient initialized with model={self.model}")
 
-    # Default result
-    out_text = getattr(response, "output_text", None) or ""
-    result = {"status": "ok", "response_text": out_text, "raw": response}
-
-    # Inspect function calls
-    for item in response.output:
-        if item.type == "function_call":
-            try:
-                args = json.loads(item.arguments)
-            except Exception:
-                args = {}
-
-            if item.name == "build_plugin":
-                return builder.build_plugin(
-                    plugin_name=args.get("plugin_name", ""),
-                    purpose=args.get("purpose", "")
-                )
-            elif item.name == "extend_plugin":
-                return extend_plugin.extend_plugin(
-                    plugin_name=args.get("plugin_name", ""),
-                    new_feature=args.get("new_feature", "")
-                )
-
-            result = {
-                "status": "function_call",
-                "name": item.name,
-                "arguments": args,
-                "raw": response
-            }
-            break
-
-    return result
-
-
-if __name__ == "__main__":
-    print("Cortex Executor REPL (type 'quit' to exit)")
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() in ["quit", "exit"]:
-            break
-        output = ask_executor(user_input)
-        print("Executor:", output)
+    def chat(self, messages: List[Dict[str, str]], **kwargs: Any) -> str:
+        """
+        Expected to return the assistant text content.
+        """
+        logger.debug("OpenAIClient.chat called", extra={"message_count": len(messages)})
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            **kwargs,
+        )
+        # Cope with both message.content (str) and array content
+        msg = resp.choices[0].message
+        content = getattr(msg, "content", "")
+        if isinstance(content, list):
+            content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content])
+        return content or ""

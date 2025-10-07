@@ -1,29 +1,345 @@
-# Cortex
+Cortex Executor — Master Plan & Roadmap
 
-Cortex is a consumer-facing executive functioning manager app.  
-This repo contains the **Cortex app** (frontend/backend) and the **Executor** AI worker module.
+Vision
 
-## Structure
-- `frontend/` – React/Electron/React Native app (future)
-- `backend/` – API services (future)
-- `executor/` – AI automation middleware + plugins
+Cortex Executor is not just a REPL — it is the foundation of a self-evolving executive functioning manager that runs on local devices and in the cloud. It combines natural conversation with structured execution, building and extending modular plugins that handle every aspect of work and life.
 
-## Executor Overview
-Executor is the task engine that powers automation for Cortex.
-It runs in Google Cloud Run, uses Artifact Registry for container images, and connects to:
-- Google Drive & Sheets
-- Telegram (approvals + alerts)
-- OpenAI API
+Ultimately, this system will:
 
-## Plugins
-- **Phalanx** – trading bot simulation + sentiment ingestion
-- **BizOps** – business automation, P&L reporting
-- **Cortex** – internal app integration tasks
+Be accessible via computer, phone, and web.
 
-## Getting Started
-1. Clone this repo.
-2. Copy `.env.template` to `.env` and fill in real values.
-3. Run locally with Docker:
+Act as a personal OS layer for task execution, organization, and innovation.
 
-   ```bash
-   docker-compose up --build
+Continuously evolve by building new modules and specialists on demand.
+
+Innovate in the background, proposing and implementing features the user didn’t even know they needed.
+
+
+
+---
+
+Core Principles
+
+1. Chat-first interface: Every user interaction is natural language, powered by ChatGPT. Executor never relies on brittle rule-based parsing.
+
+
+2. Structured execution: Conversations are always translated into strict JSON contracts before Executor acts.
+
+
+3. Self-evolving system: When asked to “build X,” Executor not only creates a plugin but also a domain-specific specialist and registers it with the router.
+
+
+4. No placeholders: All code must pass tests. Executor repairs failures automatically until success.
+
+
+5. Unified across devices: The same system runs locally and syncs to the cloud, accessible anywhere.
+
+
+
+
+---
+
+Lifecycle of a Request
+
+Big Idea → Features → Practical Application → Code
+
+1. Brainstorming (Butler)
+
+“Build me a fitness tracker.”
+
+Butler asks clarifying questions: “Do you mean workouts only, or also nutrition and bodyweight?”
+
+Pending questions collected.
+
+
+
+2. Clarification (Parser)
+
+User answers: “Workouts + bodyweight logs.”
+
+Facts saved: { "fitness_tracker_features": "workouts + bodyweight" }
+
+Parser upgrades action to status: ready.
+
+
+
+3. Planning (Task Planner)
+
+Breaks clarified goal into subtasks: schema, workout log, weight log, tests.
+
+
+
+4. Execution (Executor / Extender)
+
+Builds/extends plugin + specialist.
+
+Runs tests, self-repairs until success.
+
+Updates manifest and registry.
+
+
+
+5. Routing (Router)
+
+Future requests like “Log workout: bench 3x10” are dispatched to fitness_tracker.specialist.
+
+
+
+6. Evolution
+
+If user asks “Add meal planning”, Executor extends plugin and specialist, updates registry.
+
+
+
+
+
+---
+
+Contracts
+
+Parser / Router JSON Contract
+
+{
+  "assistant_message": "string",
+  "mode": "brainstorming|clarification|execution",
+  "questions": [{"id":"q1","scope":"fitness","question":"..."}],
+  "ideas": ["..."],
+  "facts_to_save": [{"key":"k","value":"v"}],
+  "tasks_to_add": [{"title":"...", "priority":"normal|high"}],
+  "actions": [
+    {"plugin":"string","goal":"string","status":"pending|ready","args":{}}
+  ],
+  "directive_updates": {}
+}
+
+Specialist Template
+
+# executor/plugins/<module>/specialist.py
+
+def can_handle(intent: dict) -> bool:
+    ...
+
+def handle(intent: dict) -> dict:
+    # returns {status, message, artifacts?, facts?}
+    ...
+
+def describe_capabilities() -> list[str]:
+    ...
+
+Plugin Manifest
+
+{
+  "name": "fitness_tracker",
+  "description": "Track workouts and bodyweight",
+  "capabilities": ["log_workout","log_bodyweight"],
+  "specialist": "executor.plugins.fitness_tracker.specialist"
+}
+
+
+---
+
+Repo Integration Plan
+
+repl.py: Chat loop only. Remove string guessing. Always call Router.
+
+router.py: ChatGPT-powered Parser. Enforces JSON contract. Maintains specialist registry.
+
+registry.py: Scans manifests, loads specialists, dispatches intents.
+
+builder.py: No stub code unless explicitly requested.
+
+extend_plugin.py: Ensures specialist + manifest + tests exist after extension.
+
+repo_analyzer.py: Index plugins and expose to Router.
+
+conversation_manager.py: Provide facts and history to Router.
+
+scheduler.py: Idle → brainstorm proposals, queue actions if autonomous mode enabled.
+
+
+
+---
+
+Roadmap
+
+Backend Phases
+
+1. Router + Contracts
+
+Add Router with system prompt.
+
+Add Registry to load specialists.
+
+Update REPL to always use Router.
+
+
+
+2. Extend Flow
+
+Ensure every new plugin gets a specialist + manifest update.
+
+Add template for specialist.
+
+Test: build new module → Router dispatches successfully.
+
+
+
+3. Brainstorm-first UX
+
+Wire questions[] to Pending Question Queue.
+
+Extend Task Planner to break down clarified features.
+
+End-to-end test: idea → brainstorm → clarification → build → dispatch.
+
+
+
+4. Background Autonomy
+
+Scheduler proposes improvements when idle.
+
+Guardrails for user approval or scope-based autonomy.
+
+
+
+
+Frontend Phases
+
+1. MVP Web Chat
+
+React + Tailwind + shadcn/ui.
+
+Display chat, pending questions, action queue.
+
+
+
+2. Task + Plugin Views
+
+Docket checklist.
+
+Module registry browser.
+
+
+
+3. Mindmap + Notes Integration
+
+Cytoscape for graph view.
+
+Notes + facts surfaced visually.
+
+
+
+4. Mobile Client
+
+Expo React Native app.
+
+Connects to same backend.
+
+
+
+5. Desktop Tray App
+
+Electron wrapper.
+
+Quick access, notifications.
+
+
+
+
+Cloud + Sync
+
+Backend service: Executor runs as daemon (containerized).
+
+Storage: Supabase/Postgres for facts, docket, registry, logs.
+
+Realtime sync: Supabase channels or WebSockets.
+
+Split execution:
+
+Local: tasks requiring file/OS access.
+
+Cloud: analysis, documents, business logic.
+
+
+
+
+---
+
+ML Personalization (Future Milestone)
+
+Executor should learn about the user over time, beyond static facts:
+
+Usage patterns → what modules you use most, what tasks you repeat.
+
+Interaction style → what tones/responses you engage best with.
+
+Preferences → layout, theme, features you adopt vs. reject.
+
+Anticipation → proactively propose features or shortcuts (“you always do X after Y, want me to automate that?”).
+
+
+Implementation Steps
+
+1. Structured Logging
+
+Extend conversation_manager to log usage (tasks run, modules used, user reactions).
+
+Store in .executor/memory as JSON lines.
+
+
+
+2. Offline Summarization
+
+Scheduler runs a “User Insights” specialist in brainstorming mode.
+
+Summarizes logs into a compact profile (JSON) injected into Router context.
+
+
+
+3. ML Layer (Later) Introduce specialized ML models to deepen personalization:
+
+Embeddings for representation: Use OpenAI embeddings or sentence-transformers to turn logs into vectors for similarity search.
+
+Clustering / Topic Models: Group behaviors into themes (finance, fitness, UI) using KMeans, HDBSCAN, or BERTopic.
+
+Sequence Models: Capture temporal patterns in your interactions (simple RNNs, Transformers, or even n-gram models).
+
+Preference Modeling: Reinforcement-style or Bayesian updating to track likes/dislikes and tendencies over time.
+
+
+
+4. Integration
+
+Use insights to influence brainstorming, UI proposals, and task automation.
+
+Example: when asked “Build a UI”, Executor considers repo scan plus your preferences (colors, features, usage patterns).
+
+
+
+
+
+---
+
+Endgame
+
+Cortex Executor becomes a personal OS:
+
+Natural language → structured intent → execution.
+
+Builds new capabilities on demand.
+
+Runs locally, syncs globally.
+
+Anticipates needs and innovates in background.
+
+Accessible everywhere via chat, tasks, notes, and mindmaps.
+
+
+
+---
+
+This document is the project’s guidance reference.
+
+It defines the vision, contracts, repo integration plan, and roadmap.
+
+Future development should align with these principles.

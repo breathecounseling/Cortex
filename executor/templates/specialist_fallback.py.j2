@@ -1,0 +1,33 @@
+"""
+Auto-generated specialist for {{ plugin_name }}.
+
+This file was scaffolded automatically. 
+You can extend it with domain-specific logic.
+"""
+
+from typing import Dict, Any
+
+def can_handle(intent: Dict[str, Any]) -> bool:
+    """
+    Return True if this specialist can handle the given intent.
+    """
+    return intent.get("plugin") == "{{ plugin_name }}"
+
+def handle(intent: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle a structured action {plugin, goal, status, args}.
+    Must return a dict with at least:
+        status: "ok" | "error" | "skipped"
+        message: str
+    """
+    goal = intent.get("goal", "")
+    return {
+        "status": "ok",
+        "message": f"[{{ plugin_name }}] successfully handled goal: {goal}",
+    }
+
+def describe_capabilities() -> list[str]:
+    """
+    Return a list of strings describing what this specialist can do.
+    """
+    return ["basic {{ plugin_name }} functionality"]

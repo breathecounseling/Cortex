@@ -1,8 +1,14 @@
-version: '3.9'
+version: "3.9"
+
 services:
-  executor:
-    build: ./executor
-    env_file: ./executor/.env
+  cortex-executor:
+    build: .
+    container_name: cortex-executor
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
     volumes:
-      - ./executor:/app/executor
+      # Mount repo into container for live code changes (optional)
+      - .:/app
     restart: unless-stopped
