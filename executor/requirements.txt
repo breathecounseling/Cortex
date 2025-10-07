@@ -11,7 +11,6 @@ typing-extensions
 jinja2
 aiohttp
 rich
-
 # PATCH START — Add web server deps
 fastapi
 uvicorn
