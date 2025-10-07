@@ -1,0 +1,5 @@
+{
+  "name": "repo_analyzer",
+  "description": "Repository analyzer plugin — scans and summarizes repository structure.",
+  "capabilities": []
+}

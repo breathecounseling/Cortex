@@ -1,0 +1,14 @@
+{"timestamp": "2025-09-22T21:12:49+00:00", "role": "user", "content": "My favorite color is blue."}
+{"timestamp": "2025-09-22T21:12:49+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:12:49+00:00\", \"key\": \"favorite_color\", \"value\": \"blue.\"}"}
+{"timestamp": "2025-09-22T21:16:32+00:00", "role": "user", "content": "My favorite color is blue."}
+{"timestamp": "2025-09-22T21:16:32+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:16:32+00:00\", \"key\": \"favorite_color\", \"value\": \"blue\"}"}
+{"timestamp": "2025-09-22T21:16:32+00:00", "role": "user", "content": "My favorite food is pizza."}
+{"timestamp": "2025-09-22T21:16:32+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:16:32+00:00\", \"key\": \"favorite_food\", \"value\": \"pizza\"}"}
+{"timestamp": "2025-09-22T21:35:42+00:00", "role": "user", "content": "My favorite color is blue."}
+{"timestamp": "2025-09-22T21:35:42+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:35:42+00:00\", \"key\": \"favorite_color\", \"value\": \"blue\"}"}
+{"timestamp": "2025-09-22T21:35:42+00:00", "role": "user", "content": "My favorite food is pizza."}
+{"timestamp": "2025-09-22T21:35:42+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:35:42+00:00\", \"key\": \"favorite_food\", \"value\": \"pizza\"}"}
+{"timestamp": "2025-09-22T21:38:42+00:00", "role": "user", "content": "My favorite color is blue."}
+{"timestamp": "2025-09-22T21:38:42+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:38:42+00:00\", \"key\": \"favorite_color\", \"value\": \"blue\"}"}
+{"timestamp": "2025-09-22T21:38:42+00:00", "role": "user", "content": "My favorite food is pizza."}
+{"timestamp": "2025-09-22T21:38:42+00:00", "role": "user_fact", "content": "{\"timestamp\": \"2025-09-22T21:38:42+00:00\", \"key\": \"favorite_food\", \"value\": \"pizza\"}"}
