@@ -45,3 +45,9 @@ def search_similar(query: str, top_k: int = 5) -> list[str]:
             results.append((sim, role, content))
     results.sort(reverse=True)
     return [f"{r[1]}: {r[2]}" for r in results[:top_k]]
+
+# PATCH START — add summary storage helper
+def store_summary(summary_text: str):
+    """Store a semantic summary block into the vector DB."""
+    store_vector("summary", summary_text)
+# PATCH END
