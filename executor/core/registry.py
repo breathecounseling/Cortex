@@ -1,3 +1,4 @@
+from __future__ import annotations
 # PATCH START: deterministic plugin manifest support
 import json
 from pathlib import Path
@@ -23,7 +24,6 @@ else:
     discovered_plugins = _scan_plugins_directory()
 # PATCH END
 
-from __future__ import annotations
 from importlib import import_module
 from pathlib import Path
 import json, sys, importlib
