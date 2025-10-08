@@ -18,28 +18,48 @@ def init_db_if_needed():
         conn.commit()
         conn.close()
 
-def remember(data: dict):
-    """Record simple key/value data for context recall."""
+# PATCH START: broadened legacy compatibility for remember() and record_repair()
+
+def remember(*args, **kwargs):
+    """
+    Backward-compatible memory writer.
+    Accepts flexible args and keyword arguments such as:
+    remember("system", "task_added", "details", source="docket", confidence=1.0)
+    """
     init_db_if_needed()
     db_path = Path(__file__).parent / "memory.db"
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    for k, v in data.items():
-        c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (k, str(v)))
+    # Try to build a reasonable key/value record
+    if args:
+        key = ":".join(str(a) for a in args if a is not None)
+    else:
+        key = kwargs.get("key", "unknown")
+    value = str({k: v for k, v in kwargs.items()})
+    c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
 
-def record_repair(file_path: str, patch_summary: str):
-    """Persist repair actions for the self-healer."""
+
+def record_repair(*args, **kwargs):
+    """
+    Backward-compatible repair recorder.
+    Supports both legacy and new-style calls:
+        record_repair(file="x", error="...", fix_summary="...", success=True)
+        record_repair(path, summary)
+    """
     init_db_if_needed()
     db_path = Path(__file__).parent / "memory.db"
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute(
-        "INSERT INTO memory (key, value) VALUES (?, ?)",
-        (f"repair:{file_path}", patch_summary),
-    )
+    key = "repair"
+    # unify summary fields
+    value = str(kwargs if kwargs else args)
+    c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
+
+# PATCH END
+
 
 # PATCH END
