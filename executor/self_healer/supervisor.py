@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Dict
 import subprocess
 import shlex
-import json
+import os
 
 from executor.audit.logger import get_logger
 from executor.self_healer.config import CFG
@@ -18,12 +18,24 @@ logger = get_logger(__name__)
 
 
 def _run_pytest_junit(junit_xml: Path, *extra_args: str) -> int:
-    """Run pytest with JUnit XML output."""
+    """Run pytest with JUnit XML output inside the configured repo root."""
     junit_xml.parent.mkdir(parents=True, exist_ok=True)
     args = ["pytest", f"--junitxml={junit_xml.as_posix()}", *CFG.pytest_args, *extra_args]
     cmd = " ".join(shlex.quote(a) for a in args)
     logger.info("Running tests", extra={"cmd": cmd})
-    proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    # Hermetic environment for the subprocess; run in the target repo root.
+    env = os.environ.copy()
+    env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+
+    proc = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=CFG.repo_root,           # <<< key fix: run in temp repo created by the test
+        env=env,
+    )
     logger.debug(proc.stdout[-8000:])
     return proc.returncode
 
