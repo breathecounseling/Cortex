@@ -2,13 +2,20 @@
 from __future__ import annotations
 from fastapi import FastAPI
 from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+
+# --- Cortex imports ---
 from executor.core.router import route
 from executor.ai.router import chat as chat_llm
 from executor.utils.memory import init_db_if_needed, recall_context, remember_exchange
 from executor.utils.vector_memory import store_vector, search_similar
-from fastapi.responses import HTMLResponse
+from executor.utils.summarizer import summarize_if_needed
 
+# ---------------------------------------------------------------------
+#  FastAPI application setup
+# ---------------------------------------------------------------------
 app = FastAPI(title="Cortex Executor API")
+
 
 @app.get("/")
 def healthcheck():
@@ -16,6 +23,9 @@ def healthcheck():
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------
+#  Chat endpoint with full persistence + semantic recall
+# ---------------------------------------------------------------------
 class ChatBody(BaseModel):
     text: str
     boost: bool | None = False
@@ -29,6 +39,7 @@ def chat(body: ChatBody):
     - Loads recent context from memory.db (short-term)
     - Retrieves relevant long-term memories via vector similarity
     - Persists both user and assistant messages to both databases
+    - Triggers periodic summarization
     """
     init_db_if_needed()
 
@@ -58,9 +69,18 @@ def chat(body: ChatBody):
     store_vector("user", body.text)
     store_vector("assistant", reply)
 
+    # === 6️⃣ Trigger summarizer occasionally (non-blocking) ===
+    try:
+        summarize_if_needed()
+    except Exception as e:
+        print("[Memory] Summarizer skipped:", e)
+
     return {"reply": reply, "boost_used": bool(body.boost)}
 
 
+# ---------------------------------------------------------------------
+#  Executor task router
+# ---------------------------------------------------------------------
 @app.post("/execute")
 def execute(user_text: str):
     """Retains existing Executor contract routing."""
@@ -68,11 +88,12 @@ def execute(user_text: str):
     return {"result": result}
 
 
-# === /ui Chat Interface ===
+# ---------------------------------------------------------------------
+#  In-browser UI endpoint
+# ---------------------------------------------------------------------
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     """Interactive Cortex Chat UI with Boost mode and local memory."""
-    # (keep your existing HTML block here — unchanged)
     return """
     <!DOCTYPE html>
     <html lang="en">
