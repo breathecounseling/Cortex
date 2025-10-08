@@ -1,0 +1,6 @@
+{
+  "name": "full_cycle_plugin",
+  "description": "Full cycle plugin specialist",
+  "specialist": "executor.plugins.full_cycle_plugin.specialist",
+  "capabilities": ["full_cycle"]
+}
