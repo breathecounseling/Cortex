@@ -1,55 +1,45 @@
-# executor/utils/memory.py
-from __future__ import annotations
-import os, sqlite3, time
-from typing import List, Dict, Any
+# PATCH START: legacy compatibility layer
 
-# Use Fly volume if available, otherwise fallback to local path
-DB_PATH = (
-    "/data/memory.db"
-    if os.path.exists("/data")
-    else os.path.join(os.path.dirname(__file__), "..", "memory.db")
-)
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+from pathlib import Path
+import sqlite3
 
-def _connect():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-def init_db_if_needed() -> None:
-    """Initialize the memory database if not yet created."""
-    with _connect() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at REAL NOT NULL
-            )
-            """
+def init_db_if_needed():
+    """Backward-compatible DB init for modules still calling the legacy memory API."""
+    try:
+        from executor.utils.memory import init_db  # reuse modern init if present
+        init_db()
+    except Exception:
+        db_path = Path(__file__).parent / "memory.db"
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY, key TEXT, value TEXT)"
         )
         conn.commit()
+        conn.close()
 
-def remember_exchange(role: str, text: str) -> None:
-    """Store a message (user or assistant) in persistent memory."""
+def remember(data: dict):
+    """Record simple key/value data for context recall."""
     init_db_if_needed()
-    with _connect() as conn:
-        conn.execute(
-            "INSERT INTO memory (role, content, created_at) VALUES (?, ?, ?)",
-            (role, text, time.time()),
-        )
-        conn.commit()
+    db_path = Path(__file__).parent / "memory.db"
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    for k, v in data.items():
+        c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (k, str(v)))
+    conn.commit()
+    conn.close()
 
-def recall_context(limit: int = 6) -> List[Dict[str, Any]]:
-    """Fetch the most recent N exchanges from memory."""
+def record_repair(file_path: str, patch_summary: str):
+    """Persist repair actions for the self-healer."""
     init_db_if_needed()
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT role, content FROM memory ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    db_path = Path(__file__).parent / "memory.db"
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO memory (key, value) VALUES (?, ?)",
+        (f"repair:{file_path}", patch_summary),
+    )
+    conn.commit()
+    conn.close()
 
-def clear_memory() -> None:
-    """Erase all stored exchanges."""
-    with _connect() as conn:
-        conn.execute("DELETE FROM memory")
-        conn.commit()
+# PATCH END
