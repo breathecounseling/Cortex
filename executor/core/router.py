@@ -92,6 +92,33 @@ def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | No
         resp["facts_to_save"].append({"key": key, "value": val})
         return resp
 
+# PATCH START: additional quick intent routing (Phase 2.5)
+_WEATHER_HINT = re.compile(r"\b(weather|forecast|temperature)\b", re.I)
+_NEAR_HINT = re.compile(r"\b(near\s+me|coffee|restaurant|cafe|attraction)\b", re.I)
+_WHO_HINT = re.compile(r"^\s*(who|what|where)\b", re.I)
+
+if _WEATHER_HINT.search(text):
+    resp = _base_response(f"Checking weather for: {text}", mode="execute")
+    resp["actions"].append(
+        {"plugin": "weather_plugin", "status": "ready", "args": {"query": text}}
+    )
+    return resp
+
+if _NEAR_HINT.search(text):
+    resp = _base_response(f"Searching nearby: {text}", mode="execute")
+    resp["actions"].append(
+        {"plugin": "google_places", "status": "ready", "args": {"query": text}}
+    )
+    return resp
+
+if _WHO_HINT.search(text):
+    resp = _base_response(f"Looking up entity: {text}", mode="execute")
+    resp["actions"].append(
+        {"plugin": "google_kg", "status": "ready", "args": {"query": text}}
+    )
+    return resp
+# PATCH END
+
     # 3) Lightweight search intent fallback.
     #    This is purposely simple so it never conflicts with LLM-based planners.
     #    If an upstream LLM already returned actions, this branch will be bypassed.
