@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 # ---------------------------------------------------------------------------
 # Database setup
@@ -16,7 +16,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY, key TEXT, value TEXT)"
+        "CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, value TEXT)"
     )
     conn.commit()
     conn.close()
@@ -106,27 +106,7 @@ def record_repair(*args, **kwargs):
 # Conversational context functions for API/chat integration
 # ---------------------------------------------------------------------------
 
-def recall_context(session: str = "default") -> str:
-    """
-    Retrieve stored context for a given session.
-    Used by API/chat to prefill conversational memory.
-    """
-    try:
-        init_db_if_needed()
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT key, value FROM memory WHERE key LIKE ?", (f"context:{session}%",))
-        rows = c.fetchall()
-        conn.close()
-        if not rows:
-            return ""
-        context = "\n".join(f"{k}: {v}" for k, v in rows)
-        return context
-    except Exception as e:
-        return f"[Memory recall error: {e}]"
-
-
-def remember_exchange(role: str, message: str, session: str = "default"):
+def remember_exchange(role: str, message: str, session: str = "default") -> None:
     """
     Store a conversational exchange (role + message) in memory.
     Used by the API/chat pipeline to log conversation history.
@@ -142,3 +122,33 @@ def remember_exchange(role: str, message: str, session: str = "default"):
         conn.close()
     except Exception as e:
         print(f"[Memory error: failed to record exchange: {e}]")
+
+
+def recall_context(session: str = "default", limit: int = 6) -> List[Dict[str, str]]:
+    """
+    Retrieve the most recent conversational messages for a session.
+
+    Returns a list of dicts like: [{"role": "user"|"assistant"|"system", "content": "..."}]
+    Chronological order (oldest → newest).
+    """
+    init_db_if_needed()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "SELECT id, key, value FROM memory WHERE key LIKE ? ORDER BY id DESC LIMIT ?",
+        (f"context:{session}:%", int(limit)),
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return []
+
+    messages: List[Dict[str, str]] = []
+    for _id, key, value in reversed(rows):  # chronological
+        try:
+            role = key.split(":", 2)[2]
+        except Exception:
+            role = "user"
+        messages.append({"role": role, "content": value})
+    return messages
