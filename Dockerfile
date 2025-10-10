@@ -13,6 +13,5 @@ COPY executor ./executor
 # Expose API port
 EXPOSE 8000
 
-# Correct FastAPI app entrypoint
-CMD ["uvicorn", "executor.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-# PATCH END
+# Run preflight checks before starting the API
+CMD ["bash", "-c", "python executor/preflight.py && uvicorn executor.api.main:app --host 0.0.0.0 --port 8000"]
