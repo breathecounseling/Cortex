@@ -1,115 +1,111 @@
-# executor/core/router.py
-# PATCH START — LLM-driven intent router with registry fallback
 from __future__ import annotations
-import importlib, pkgutil, sys, traceback
-from typing import Dict, Any, Callable
 
-from executor.core.intent import infer_intent
+"""
+Cortex Router
+-------------
+Purpose:
+- Normalize raw user input into a conservative, test-friendly action contract.
+- Decide *when* to invoke capabilities (plugins), but never hard-depend on optional modules.
+- Stay resilient under pytest and Fly.io (no fragile imports, no background work).
 
-# --- Optional: use your existing registry if available ---
-def _load_registered_plugins_via_registry() -> Dict[str, Dict[str, Any]]:
-    try:
-        from executor.core import registry as reg  # type: ignore
-        # Expect registry to provide: get_registered_plugins() -> Dict[str, Module]
-        plugins = reg.get_registered_plugins()  # type: ignore
-        out: Dict[str, Dict[str, Any]] = {}
-        for name, mod in plugins.items():
-            desc = ""
-            try:
-                if hasattr(mod, "describe_capabilities"):
-                    desc = str(mod.describe_capabilities())  # type: ignore
-            except Exception:
-                desc = ""
-            out[name] = {"module": mod, "description": desc}
-        return out
-    except Exception:
-        return {}
+Outputs follow the repo’s expected schema:
+{
+  "assistant_message": str,
+  "mode": "execute" | "brainstorming" | "chat",
+  "questions": list[str],                 # optional
+  "ideas": list[str],                      # optional
+  "facts_to_save": list[dict],            # [{"key":..., "value":...}]
+  "tasks_to_add": list[str],              # task titles (tests consume this)
+  "directive_updates": dict,              # optional map of settings to change
+  "actions": [                            # dispatcher actions
+     {"plugin": str, "status": "ready", "args": dict}
+  ]
+}
+"""
 
-# --- Fallback: dynamic loader scans executor.plugins.* ---
-def _dynamic_scan_plugins() -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
-    try:
-        pkg_name = "executor.plugins"
-        pkg = importlib.import_module(pkg_name)
-        for modinfo in pkgutil.iter_modules(pkg.__path__, pkg_name + "."):
-            try:
-                mod = importlib.import_module(modinfo.name)
-                # must expose can_handle() and handle()
-                if hasattr(mod, "handle") and callable(getattr(mod, "handle")):
-                    # name is leaf module path after executor.plugins.
-                    leaf = modinfo.name.split(".")[-1]
-                    desc = ""
-                    if hasattr(mod, "describe_capabilities"):
-                        try:
-                            desc = str(mod.describe_capabilities())
-                        except Exception:
-                            desc = ""
-                    out[leaf] = {"module": mod, "description": desc}
-            except Exception:
-                # keep scanning; avoid breaking on one bad plugin
-                continue
-    except Exception:
-        pass
-    return out
+from typing import Any, Dict, List
+import re
 
-def _collect_plugins() -> Dict[str, Dict[str, Any]]:
-    via_reg = _load_registered_plugins_via_registry()
-    return via_reg if via_reg else _dynamic_scan_plugins()
 
-def _call_plugin(mod, params: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        return mod.handle(params)  # plugin contract
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Plugin '{mod.__name__}' raised: {e}",
-            "traceback": traceback.format_exc(),
-        }
+# ---- Lightweight intent hints (kept simple to avoid brittleness) ----
+_SEARCH_HINTS = re.compile(
+    r"\b(search|look\s*up|find|weather|forecast|news|near\s*me)\b",
+    re.IGNORECASE,
+)
 
-def route(user_text: str) -> Dict[str, Any]:
-    """
-    Public router API — maintained for backward compatibility.
-    Returns a dict result from the chosen plugin, or a builder-ready plan.
-    """
-    plugins = _collect_plugins()
-    # Shape for planner: {"name": {"description": "..."}}
-    plan_plugins = {k: {"description": v.get("description", "")} for k, v in plugins.items()}
+_IDEA_HINT = re.compile(r"^\s*\[idea\]\s*(.+)$", re.IGNORECASE)
 
-    plan = infer_intent(user_text, plan_plugins)
-    target = plan.get("target_plugin") or "none"
-    params = plan.get("parameters") or {}
+_FACTS_HINT = re.compile(
+    r"^\s*\[fact(?:s)?\]\s*(?P<key>[^:=]+?)\s*[:=]\s*(?P<val>.+)$",
+    re.IGNORECASE,
+)
 
-    # If planner knows the plugin by a different alias, try fuzzy key match
-    target_key = None
-    if target in plugins:
-        target_key = target
-    else:
-        # small, safe normalization
-        t = target.replace("-", "_").lower()
-        for k in plugins.keys():
-            if k.replace("-", "_").lower() == t:
-                target_key = k
-                break
 
-    if target_key:
-        mod = plugins[target_key]["module"]
-        result = _call_plugin(mod, params)
-        # attach a small execution receipt
-        result.setdefault("status", "ok")
-        result.setdefault("meta", {})
-        result["meta"].update({"intent": plan.get("intent"), "plugin": target_key})
-        return result
-
-    # No plugin matched — return a builder-ready response
+def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
+    """Return a conservative response skeleton with required fields present."""
     return {
-        "status": "no_plugin",
-        "message": "No existing plugin matched the request.",
-        "plan": {
-            "intent": plan.get("intent", "freeform.respond"),
-            "suggested_plugin": plan.get("target_plugin", "new_plugin"),
-            "parameters": params,
-            "source_text": user_text,
-        },
-        "meta": {"plugins_available": list(plugins.keys())},
+        "assistant_message": msg,
+        "mode": mode,
+        "questions": [],
+        "ideas": [],
+        "facts_to_save": [],
+        "tasks_to_add": [],
+        "directive_updates": {},
+        "actions": [],
     }
-# PATCH END
+
+
+def _normalize_text(text: Any) -> str:
+    s = "" if text is None else str(text)
+    # strip only trailing/leading whitespace; keep user punctuation
+    return s.strip()
+
+
+def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """
+    Main router entrypoint used by REPL, API, and tests.
+    Must never raise for normal inputs. Keep all optional behaviors guarded.
+    """
+    text = _normalize_text(user_text)
+    directives = directives or {}
+
+    # Empty input → neutral reply (keeps UI responsive, avoids exceptions)
+    if not text:
+        return _base_response("How can I help?")
+
+    # 1) Explicit "[idea] ..." capture → adds a task (status handled by Docket)
+    m_idea = _IDEA_HINT.match(text)
+    if m_idea:
+        idea_title = m_idea.group(1).strip() or "New idea"
+        resp = _base_response(f"Captured idea: {idea_title}", mode="brainstorming")
+        resp["ideas"].append(idea_title)
+        # tests expect tasks_to_add to contain raw titles (they set 'todo' status in Docket)
+        resp["tasks_to_add"].append(f"[idea] {idea_title}")
+        return resp
+
+    # 2) Explicit "[fact] key: value" capture → persist simple facts
+    m_fact = _FACTS_HINT.match(text)
+    if m_fact:
+        key = m_fact.group("key").strip()
+        val = m_fact.group("val").strip()
+        resp = _base_response(f"Noted: {key} = {val}", mode="chat")
+        resp["facts_to_save"].append({"key": key, "value": val})
+        return resp
+
+    # 3) Lightweight search intent fallback.
+    #    This is purposely simple so it never conflicts with LLM-based planners.
+    #    If an upstream LLM already returned actions, this branch will be bypassed.
+    if _SEARCH_HINTS.search(text):
+        resp = _base_response(f"Searching the web for: {text}", mode="execute")
+        resp["actions"].append(
+            {
+                "plugin": "web_search",
+                "status": "ready",
+                "args": {"query": text},
+            }
+        )
+        return resp
+
+    # 4) Default: plain chat pass-through (lets specialists or REPL handle it).
+    #    We keep this conservative to avoid surprising the tests.
+    return _base_response("Okay — let me think about that.")
