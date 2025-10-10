@@ -12,5 +12,9 @@
     "executor.plugins.task_planner"
     "executor.plugins.web_search",
     "executor.plugins.feedback"
+    "executor.plugins.google_kg",
+    "executor.plugins.google_places",
+    "executor.plugins.weather_plugin",
+    "executor.plugins.innovation_engine"
   ]
 }
