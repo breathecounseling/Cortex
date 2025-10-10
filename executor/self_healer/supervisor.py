@@ -14,6 +14,18 @@ from executor.utils.patcher_utils import write_patch
 from executor.utils.memory import record_repair
 from executor.connectors.openai_client import OpenAIClient
 
+# ---------------------------------------------------------------------------
+# Directive enforcement import
+# ---------------------------------------------------------------------------
+try:
+    from executor.self_healer.check_directive import verify_all
+except Exception as e:
+    # Safe fallback if check_directive not yet present
+    def verify_all() -> bool:
+        print(f"[Supervisor] Warning: check_directive import failed ({e})")
+        return False
+# ---------------------------------------------------------------------------
+
 logger = get_logger(__name__)
 
 
@@ -33,7 +45,7 @@ def _run_pytest_junit(junit_xml: Path, *extra_args: str) -> int:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        cwd=CFG.repo_root,           # <<< key fix: run in temp repo created by the test
+        cwd=CFG.repo_root,
         env=env,
     )
     logger.debug(proc.stdout[-8000:])
@@ -132,7 +144,16 @@ def run_self_healer(*pytest_extra: str) -> CycleResult:
 
 
 def main() -> int:
-    """Run multiple cycles until tests pass or limits reached."""
+    """Run preflight verification, then healing cycles until tests pass."""
+    logger.info("Self-healer supervisor starting directive verification.")
+    try:
+        if verify_all():
+            logger.info("Directive verification passed — test suite already green.")
+            return 0
+    except Exception as e:
+        logger.warning(f"Pre-healer verification error: {e}")
+
+    # Proceed with normal healing if verification failed
     cycles = 0
     last_failures = None
     while cycles < CFG.max_cycles:
