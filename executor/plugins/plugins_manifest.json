@@ -10,5 +10,7 @@
     "executor.plugins.full_cycle_plugin",
     "executor.plugins.cortex.self_tasks",
     "executor.plugins.task_planner"
+    "executor.plugins.web_search",
+    "executor.plugins.feedback"
   ]
 }
