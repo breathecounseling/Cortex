@@ -1,0 +1,1 @@
+from .web_search import can_handle, describe_capabilities, handle  # noqa: F401
