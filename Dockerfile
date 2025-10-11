@@ -4,7 +4,7 @@ WORKDIR /ui
 
 # Install dependencies
 COPY frontend/package*.json ./
-RUN npm ci || npm install
+RUN npm install
 
 # Build
 COPY frontend ./
