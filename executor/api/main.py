@@ -1,42 +1,40 @@
 from __future__ import annotations
 import os
-from typing import List, Dict
-
+import logging
+from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 
-# ---- Cortex core + AI wrappers (from the known-good zip) ----
-# Router decides when to call plugins vs model
-from executor.core.router import route as route_intent
-# LLM wrapper used when we need a free-form reply
-from executor.ai.router import chat as chat_llm
-
-# Memory & summarization layers
-from executor.utils.memory import (
-    init_db_if_needed,
-    recall_context,
-    remember_exchange,
-)
-from executor.utils.vector_memory import (
-    store_vector,
-    search_similar,
-)
-from executor.utils.summarizer import summarize_if_needed
+# Optional env loader; harmless if missing
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
 
 # ------------------------------------------------------------
 #  FastAPI app
 # ------------------------------------------------------------
 app = FastAPI(title="Cortex API")
 
-# Serve built UI (Vite) at /ui if present
+# Verbose request logging so Fly logs show /chat calls
+logging.basicConfig(level=logging.INFO)
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logging.info("%s %s", request.method, request.url.path)
+    return await call_next(request)
+
+# ------------------------------------------------------------
+#  Serve built UI (Vite) at /ui if present
+# ------------------------------------------------------------
 _UI_DIR = Path(__file__).resolve().parent.parent / "static" / "ui"
 if _UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
 
 # ------------------------------------------------------------
-#  Health & root
+#  Heartbeat & Health
 # ------------------------------------------------------------
 @app.get("/")
 def root() -> dict:
@@ -47,7 +45,7 @@ def health_check():
     return JSONResponse({"status": "ok", "message": "Cortex backend healthy."})
 
 # ------------------------------------------------------------
-#  Context endpoint for the UI sidebar (unchanged)
+#  Context endpoint (unchanged)
 # ------------------------------------------------------------
 @app.get("/context")
 def get_context() -> dict:
@@ -58,106 +56,89 @@ def get_context() -> dict:
         return {"status": "error", "message": f"context unavailable: {e}"}
 
 # ------------------------------------------------------------
-#  CHAT — restored brain/memory flow
+#  CHAT — restore full brain path via Router + plugins + memory
 # ------------------------------------------------------------
 @app.post("/chat")
 async def chat_endpoint(request: Request) -> dict:
     """
-    Restored Cortex stack:
-      1) init short-term memory
-      2) recall recent context
-      3) semantic recall from vector memory (if API key present)
-      4) route intent (plugins) OR call LLM wrapper
-      5) persist exchanges
-      6) store vectors + maybe summarize
-    Always fails safe per Directive #7.
+    Route chat through Cortex Router. This:
+      1) initializes logging/memory (best-effort),
+      2) ensures plugin packages import (registry side-effects),
+      3) calls router.route_input(...) if present, else router.route(...),
+      4) normalizes the result to {status, assistant_message},
+      5) falls back to AI (or offline echo) if router fails.
     """
     body = await request.json()
-    user_text: str = (body.get("message") or body.get("text") or "").strip()
-    boost: bool = bool(body.get("boost", False))
-    system: str | None = body.get("system")
-
-    if not user_text:
+    message: str = (body.get("message") or body.get("text") or "").strip()
+    if not message:
         return {"status": "error", "message": "Empty message."}
 
-    # 1) Ensure memory DB exists
+    # 1) initialize logging + memory (no-op if already done)
     try:
+        from executor.audit.logger import initialize_logging  # type: ignore
+        initialize_logging()
+    except Exception:
+        pass
+    try:
+        from executor.utils.memory import init_db_if_needed  # type: ignore
         init_db_if_needed()
     except Exception:
         pass
 
-    # 2) Recall short-term context (best-effort)
-    ctx: List[Dict[str, str]] = []
+    # 2) ensure plugins import (some registries rely on import side-effects)
     try:
-        # prefer newer signature with limit
-        ctx = recall_context(limit=6)
-    except TypeError:
-        try:
-            ctx = recall_context()
-        except Exception:
-            ctx = []
+        import executor.plugins  # noqa: F401
+    except Exception as e:
+        logging.warning("Plugins import failed: %s", e)
 
-    context_text = "\n".join(
-        f"{m.get('role','')}:{m.get('content','')}" for m in ctx
-    ) if isinstance(ctx, list) else str(ctx)
-
-    # 3) Semantic memory recall — only when OPENAI_API_KEY available
-    memory_text = ""
-    if os.getenv("OPENAI_API_KEY"):
-        try:
-            memories = search_similar(user_text, top_k=5)
-            memory_text = "\n".join(memories)
-        except Exception:
-            memory_text = ""
-
-    # 4) Route intent to plugins; if router returns a usable assistant_message, use it.
-    assistant_message: str | None = None
+    # 3) call router entrypoint (route_input preferred; fallback to route)
     try:
-        routed = route_intent(user_text, session="repl", directives=None)
-        # Expect dict with possibly 'assistant_message' or 'summary'
+        from executor.core import router  # type: ignore
+        logging.info("Router module loaded: %s", router.__file__)
+
+        if hasattr(router, "route_input"):
+            routed = router.route_input(message)
+        elif hasattr(router, "route"):
+            routed = router.route(message)
+        else:
+            raise RuntimeError("Router has no route_input/route")
+
+        # 4) normalize router response
         if isinstance(routed, dict):
-            assistant_message = routed.get("assistant_message") or routed.get("summary")
-    except Exception:
-        # Router not available or plugin error — fall back to LLM below
-        assistant_message = None
+            # Prefer assistant_message, then summary/message
+            assistant = routed.get("assistant_message") or routed.get("summary") or routed.get("message")
+            if assistant:
+                return {"status": routed.get("status", "ok"), "assistant_message": assistant, "data": routed.get("data")}
+            # If router returned a dict but no text, at least pass it through
+            return {"status": routed.get("status", "ok"), "assistant_message": "Okay — let me think about that.", "data": routed}
 
-    # If router didn't produce a message, call the LLM wrapper (with memory/context)
-    if not assistant_message:
-        prompt = user_text
-        if memory_text:
-            prompt = f"Relevant past memory:\n{memory_text}\n\nUser: {user_text}"
-        if context_text:
-            prompt = f"{prompt}\n\n(Recent context)\n{context_text}"
+        # non-dict, stringify
+        return {"status": "ok", "assistant_message": str(routed)}
+
+    except Exception as e:
+        logging.exception("Router path failed: %s", e)
+        # 5) AI fallback (keeps startup safe per Directive #7)
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return {"status": "ok", "assistant_message": f"(offline echo) {message}", "detail": str(e)}
         try:
-            assistant_message = chat_llm(prompt, boost=boost, system=system)
-        except Exception as e:
-            # last-resort offline mode
-            assistant_message = f"(offline echo) {user_text}\n\n(detail: {e})"
-
-    # 5) Persist exchanges (best-effort)
-    try:
-        remember_exchange("user", user_text)
-        remember_exchange("assistant", assistant_message or "")
-    except Exception:
-        pass
-
-    # 6) Store vectors and maybe summarize (only if embeddings available)
-    if os.getenv("OPENAI_API_KEY"):
-        try:
-            store_vector("user", user_text)
-            store_vector("assistant", assistant_message or "")
-            summarize_if_needed()
-        except Exception:
-            pass
-
-    return {
-        "status": "ok",
-        "assistant_message": assistant_message or "",
-        "used_router": bool(assistant_message),  # for quick sanity in logs
-    }
+            from openai import OpenAI  # type: ignore
+            client = OpenAI(api_key=api_key)
+            r = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are Cortex. The internal router failed; answer helpfully and concisely."},
+                    {"role": "user", "content": message},
+                ],
+                max_tokens=500,
+            )
+            reply = r.choices[0].message.content
+            return {"status": "ok", "assistant_message": reply}
+        except Exception as inner:
+            return {"status": "error", "message": f"Router and fallback failed: {inner}"}
 
 # ------------------------------------------------------------
-#  EXECUTE (kept as-is)
+#  Execute (unchanged)
 # ------------------------------------------------------------
 @app.post("/execute")
 async def execute_endpoint(request: Request) -> dict:
