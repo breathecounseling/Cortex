@@ -1,14 +1,3 @@
-"""
-check_directive.py
-------------------
-Runs the repository validation steps defined in GPT_PATCHING_DIRECTIVE.md.
-
-Exit codes:
-    0 : all checks passed
-    1 : syntax or import failure
-    2 : pytest failure
-"""
-
 from __future__ import annotations
 import subprocess, sys, compileall, importlib, traceback, time
 
@@ -35,11 +24,7 @@ def test_check() -> bool:
     try:
         result = subprocess.run(["pytest", "-q"], capture_output=True, text=True, timeout=300)
         print(result.stdout)
-        if result.returncode == 0:
-            print("[Healer] All tests passed.")
-            return True
-        print("[Healer] Test failures detected.")
-        return False
+        return result.returncode == 0
     except Exception as e:
         print("[Healer] Pytest error:", e)
         return False
@@ -47,12 +32,8 @@ def test_check() -> bool:
 def verify_all() -> bool:
     start = time.time()
     ok = syntax_check() and import_check() and test_check()
-    dur = round(time.time() - start, 2)
-    print(f"[Healer] Verification complete in {dur}s -> {'PASS' if ok else 'FAIL'}")
+    print(f"[Healer] Verification complete in {round(time.time()-start,2)}s -> {'PASS' if ok else 'FAIL'}")
     return ok
 
 if __name__ == "__main__":
-    if verify_all():
-        sys.exit(0)
-    else:
-        sys.exit(1)
+    sys.exit(0 if verify_all() else 1)
