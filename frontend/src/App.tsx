@@ -1,40 +1,18 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import ChatPane from "./components/ChatPane";
-import ContextPanel from "./components/ContextPanel";
-import { getContext } from "./lib/api";
 
 export default function App() {
-  const [ctx, setCtx] = useState<any>(null);
-
-  useEffect(() => {
-    let alive = true;
-    async function tick() {
-      try {
-        const res = await getContext();
-        if (alive && res?.status === "ok") setCtx(res.data);
-      } catch {}
-    }
-    tick();
-    const id = setInterval(tick, 15_000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, []);
-
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] h-screen">
-      <section className="flex flex-col bg-white">
+    <div className="grid grid-cols-1 h-screen bg-white">
+      <section className="flex flex-col">
         <header className="border-b p-4">
-          <h1 className="text-xl font-semibold text-gray-800">
-            Cortex · Chat Interface
-          </h1>
+          <h1 className="text-xl font-semibold text-gray-800">Cortex · Chat</h1>
+          <p className="text-sm text-gray-500">Backed by Router → Plugins (web_search, weather, places, KG)</p>
         </header>
         <main className="flex-1 overflow-hidden">
           <ChatPane />
         </main>
       </section>
-      <ContextPanel ctx={ctx} />
     </div>
   );
 }
