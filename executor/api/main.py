@@ -129,6 +129,17 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
 
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
+# PATCH START: Fly.io health probe endpoint
+from fastapi.responses import JSONResponse
+
+@app.get("/health", include_in_schema=False)
+def health_check():
+    """
+    Lightweight health check for Fly.io.
+    Returns 200 OK if the API and preflight completed successfully.
+    """
+    return JSONResponse({"status": "ok", "message": "Cortex backend healthy."})
+# PATCH END
 
 # ---------- Startup message ----------
 @app.on_event("startup")
