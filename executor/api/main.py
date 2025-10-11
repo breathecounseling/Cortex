@@ -7,6 +7,7 @@ from typing import Any, Dict
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from executor.core.router import route
@@ -97,6 +98,12 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": f"{plugin} failed: {e}"}
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
+
+
+
+@app.get("/health", include_in_schema=False)
+def health():
+    return JSONResponse({"status": "ok"})
 
 @app.on_event("startup")
 def startup_message() -> None:
