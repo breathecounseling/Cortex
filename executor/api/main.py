@@ -5,9 +5,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from executor.core.router import route
@@ -17,6 +16,11 @@ import executor.plugins.google_kg.google_kg as google_kg
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 
+# 🧠 Brain + memory imports
+from executor.ai.router import chat as brain_chat
+from executor.utils.memory import init_db_if_needed, recall_context, remember_exchange
+from executor.utils.vector_memory import store_vector, summarize_if_needed
+
 app = FastAPI()
 
 # Mount built frontend at /ui if present
@@ -24,14 +28,17 @@ _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "di
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
 
+
 class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
     system: str | None = None
 
+
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Cortex API is running."}
+
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
@@ -44,15 +51,40 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
+    # ---- ROUTER PHASE ----
     try:
         router_output = route(text)
     except Exception as e:
         return {"reply": f"Router error: {e}"}
 
     actions = router_output.get("actions", [])
-    if not actions:
-        return {"reply": router_output.get("assistant_message", "Okay.")}
 
+    # ---- 🧠  If no plugin actions, fall back to brain + memory ----
+    if not actions:
+        try:
+            # initialize memory and recall context
+            init_db_if_needed()
+            context = recall_context(limit=6)
+        except Exception:
+            context = []
+        try:
+            reply = brain_chat(text, context=context)
+        except Exception as e:
+            reply = f"(brain offline) {e}"
+
+        # record exchanges + vectors (best-effort)
+        try:
+            remember_exchange("user", text)
+            remember_exchange("assistant", reply)
+            store_vector("user", text)
+            store_vector("assistant", reply)
+            summarize_if_needed()
+        except Exception:
+            pass
+
+        return {"reply": reply}
+
+    # ---- PLUGIN DISPATCH ----
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -78,6 +110,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         return {"reply": f"Plugin error ({plugin}): {e}"}
 
+
 @app.post("/execute")
 def execute(body: Dict[str, Any]) -> Dict[str, Any]:
     plugin = body.get("plugin")
@@ -100,10 +133,10 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
 
-
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
+
 
 @app.on_event("startup")
 def startup_message() -> None:
