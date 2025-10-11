@@ -3,60 +3,43 @@ import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import { postChat } from "../lib/api";
 
-type Message = { role: string; text: string };
+type Msg = { role: "user" | "assistant" | "system"; text: string };
 
 export default function ChatPane() {
-  const [messages, setMessages] = useState<Message[]>([
-    { role: "assistant", text: "👋 Hi! I'm Cortex — how can I help you today?" }
+  const [msgs, setMsgs] = useState<Msg[]>([
+    { role: "assistant", text: "👋 Hi! I’m Cortex — ask me to search, check weather, or find places." }
   ]);
   const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
+  const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth"
-    });
-  }, [messages]);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [msgs]);
 
-  async function handleSend() {
-    const msg = input.trim();
-    if (!msg) return;
+  async function send() {
+    const text = input.trim();
+    if (!text) return;
     setInput("");
-    setMessages((m) => [...m, { role: "user", text: msg }]);
-    setSending(true);
+    setMsgs((m) => [...m, { role: "user", text }]);
+    setBusy(true);
     try {
-      const res = await postChat(msg);
-      const reply =
-        res?.assistant_message ?? res?.message ?? JSON.stringify(res, null, 2);
-      setMessages((m) => [...m, { role: "assistant", text: reply }]);
+      const res = await postChat(text);
+      const reply = (res && (res.reply ?? res.assistant_message ?? res.message)) || "Okay.";
+      setMsgs((m) => [...m, { role: "assistant", text: reply }]);
     } catch (e: any) {
-      setMessages((m) => [
-        ...m,
-        { role: "system", text: `⚠️ ${e?.message || "Unknown error"}` }
-      ]);
+      setMsgs((m) => [...m, { role: "system", text: `⚠️ ${e?.message || "Network error"}` }]);
     } finally {
-      setSending(false);
+      setBusy(false);
     }
   }
 
   return (
     <div className="flex flex-col h-full">
-      <div
-        ref={scrollRef}
-        className="flex-1 overflow-y-auto p-4 bg-gray-50 scrollbar-thin"
-      >
-        {messages.map((m, i) => (
-          <ChatMessage key={i} role={m.role} text={m.text} />
-        ))}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 bg-gray-50 scrollbar-thin">
+        {msgs.map((m, i) => <ChatMessage key={i} role={m.role} text={m.text} />)}
       </div>
-      <ChatInput
-        value={input}
-        onChange={setInput}
-        onSend={handleSend}
-        disabled={sending}
-      />
+      <ChatInput value={input} onChange={setInput} onSend={send} disabled={busy} />
     </div>
   );
 }
