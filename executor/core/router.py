@@ -1,21 +1,48 @@
 from __future__ import annotations
 from typing import Any, Dict
-import re
+from pathlib import Path
+import json, time
+from executor.core.intent import infer_intent
 
-_SEARCH_HINTS = re.compile(
-    r"\b(search|look\s*up|find|weather|forecast|news|near\s*me)\b",
-    re.IGNORECASE,
-)
-_IDEA_HINT = re.compile(r"^\s*\[idea\]\s*(.+)$", re.IGNORECASE)
-_FACTS_HINT = re.compile(
-    r"^\s*\[fact(?:s)?\]\s*(?P<key>[^:=]+?)\s*[:=]\s*(?P<val>.+)$",
-    re.IGNORECASE,
-)
+# ---------------------------------------------------------------------------
+# Simple on-disk cache for intent classification
+# ---------------------------------------------------------------------------
 
-_WEATHER_HINT = re.compile(r"\b(weather|forecast|temperature)\b", re.I)
-_NEAR_HINT = re.compile(r"\b(near\s+me|coffee|restaurant|cafe|attraction)\b", re.I)
-_WHO_HINT = re.compile(r"^\s*(who|what|where)\b", re.I)
+_CACHE_PATH = Path("/data") / "intent_cache.json"
+_CACHE_TTL = 3600  # seconds (1 hour)
 
+def _load_cache() -> Dict[str, Dict[str, Any]]:
+    try:
+        if _CACHE_PATH.exists():
+            return json.loads(_CACHE_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_cache(cache: Dict[str, Any]) -> None:
+    try:
+        _CACHE_PATH.write_text(json.dumps(cache, indent=2))
+    except Exception:
+        pass
+
+def _get_cached_intent(text: str) -> Dict[str, Any] | None:
+    cache = _load_cache()
+    entry = cache.get(text)
+    if not entry:
+        return None
+    # discard if expired
+    if time.time() - entry.get("ts", 0) > _CACHE_TTL:
+        return None
+    return entry.get("plan")
+
+def _set_cached_intent(text: str, plan: Dict[str, Any]) -> None:
+    cache = _load_cache()
+    cache[text] = {"plan": plan, "ts": time.time()}
+    _save_cache(cache)
+
+# ---------------------------------------------------------------------------
+# Base router helpers
+# ---------------------------------------------------------------------------
 
 def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
     return {
@@ -29,10 +56,12 @@ def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
         "actions": [],
     }
 
-
 def _normalize_text(text: Any) -> str:
     return ("" if text is None else str(text)).strip()
 
+# ---------------------------------------------------------------------------
+# Main route function
+# ---------------------------------------------------------------------------
 
 def route(
     user_text: Any,
@@ -40,61 +69,36 @@ def route(
     directives: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    Main router entrypoint used by REPL, API, and tests.
-    Decides which plugin (if any) should handle a message,
-    otherwise defers to the brain for conversational replies.
+    LLM-driven intent router with caching.
+    Uses core.intent.infer_intent() to classify messages and decide which plugin to call.
     """
     text = _normalize_text(user_text)
     directives = directives or {}
     if not text:
         return _base_response("How can I help?")
 
-    # ---- [idea] capture ----
-    m_idea = _IDEA_HINT.match(text)
-    if m_idea:
-        idea_title = m_idea.group(1).strip() or "New idea"
-        resp = _base_response(f"Captured idea: {idea_title}", mode="brainstorming")
-        resp["ideas"].append(idea_title)
-        resp["tasks_to_add"].append(f"[idea] {idea_title}")
-        return resp
+    # Try cached plan first
+    plan = _get_cached_intent(text)
+    if not plan:
+        # Describe available plugins for the intent model
+        available_plugins = {
+            "web_search": {"description": "Perform general web and news searches."},
+            "weather_plugin": {"description": "Get current or forecasted weather data."},
+            "google_places": {"description": "Find nearby businesses or attractions."},
+            "feedback": {"description": "Store or summarize user feedback."},
+        }
+        plan = infer_intent(text, available_plugins)
+        _set_cached_intent(text, plan)
 
-    # ---- [fact] capture ----
-    m_fact = _FACTS_HINT.match(text)
-    if m_fact:
-        key = m_fact.group("key").strip()
-        val = m_fact.group("val").strip()
-        resp = _base_response(f"Noted: {key} = {val}", mode="chat")
-        resp["facts_to_save"].append({"key": key, "value": val})
-        return resp
+    plugin = plan.get("target_plugin", "none")
+    params = plan.get("parameters", {})
+    intent = plan.get("intent", "freeform.respond")
 
-    # ---- Generic "search / find / weather / news / near me" keywords ----
-    if _SEARCH_HINTS.search(text):
-        resp = _base_response(f"Searching the web for: {text}", mode="execute")
+    # ---- Route to plugin if chosen ----
+    if plugin and plugin != "none":
+        resp = _base_response(f"Routing to {plugin}", mode="execute")
         resp["actions"].append(
-            {"plugin": "web_search", "status": "ready", "args": {"query": text}}
-        )
-        return resp
-
-    # ---- Quick-intent routing ----
-    if _WEATHER_HINT.search(text):
-        resp = _base_response(f"Checking weather for: {text}", mode="execute")
-        resp["actions"].append(
-            {"plugin": "weather_plugin", "status": "ready", "args": {"query": text}}
-        )
-        return resp
-
-    if _NEAR_HINT.search(text):
-        resp = _base_response(f"Searching nearby: {text}", mode="execute")
-        resp["actions"].append(
-            {"plugin": "google_places", "status": "ready", "args": {"query": text}}
-        )
-        return resp
-
-    if _WHO_HINT.search(text):
-        # Route 'who/what/where' directly to custom search instead of KG
-        resp = _base_response(f"Searching the web for: {text}", mode="execute")
-        resp["actions"].append(
-            {"plugin": "web_search", "status": "ready", "args": {"query": text}}
+            {"plugin": plugin, "status": "ready", "args": params or {"query": text}}
         )
         return resp
 
