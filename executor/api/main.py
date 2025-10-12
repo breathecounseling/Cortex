@@ -165,6 +165,17 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
 
+# --- temporary maintenance endpoint (delete after running once) ---
+@app.get("/reset-memory", include_in_schema=False)
+def reset_memory():
+    import os
+    try:
+        os.remove("/data/memory.db")
+        return {"status": "ok", "message": "memory.db removed"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+# --- end temporary fix ---
+
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
