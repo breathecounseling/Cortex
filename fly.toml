@@ -1,0 +1,88 @@
+# fly.toml — Cortex Phase 2.7 Deployment
+# App: cortex-vhq8ow
+# Environment: Fly.io (Python 3.11 + Node 20 multi-stage)
+# Docs: https://fly.io/docs/reference/configuration/
+
+app = "cortex-vhq8ow"
+primary_region = "iad"
+
+# ──────────────────────────────────────────────
+# 🧩 BUILD CONFIGURATION
+# ──────────────────────────────────────────────
+[build]
+  dockerfile = "./Dockerfile"
+  # No build.args required — multi-stage Docker handles Node + Python.
+
+# ──────────────────────────────────────────────
+# 🌐 RUNTIME ENVIRONMENT
+# ──────────────────────────────────────────────
+[env]
+  PORT = "8000"
+  PYTHONPATH = "/app"
+  PYTHONUNBUFFERED = "1"
+  # Cortex runs preflight before uvicorn; ensure no startup hang.
+  CORTEX_MODE = "production"
+  CORTEX_SELF_HEALER = "enabled"
+
+# ──────────────────────────────────────────────
+# ⚙️ HTTP SERVICE SETTINGS
+# ──────────────────────────────────────────────
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  # Cache static UI assets aggressively for the /ui build
+  [http_service.tls_options]
+    alpn = ["h2", "http/1.1"]
+
+# ──────────────────────────────────────────────
+# 💾 PERSISTENT STORAGE (for plugin memory, logs, etc.)
+# ──────────────────────────────────────────────
+[mounts]
+  source = "cortex_data"
+  destination = "/data"
+
+# ──────────────────────────────────────────────
+# 🧠 AUTOSCALING + VM PROFILE
+# ──────────────────────────────────────────────
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# ──────────────────────────────────────────────
+# 🩺 HEALTH CHECKS (safe startup)
+# ──────────────────────────────────────────────
+[[services]]
+  internal_port = 8000
+  protocol = "tcp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.http_checks]]
+    interval = "15s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"          # (optional endpoint; will fallback to /chat if not present)
+    protocol = "http"
+    timeout = "5s"
+    tls_skip_verify = false

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from executor.audit.logger import get_logger, initialize_logging
 from executor.utils.memory import init_db_if_needed
-from repl import process_message  # Adjust import if needed
+from executor.connectors.repl import process_message  # Adjust import if needed
 
 logger = get_logger(__name__)
 

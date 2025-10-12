@@ -14,4 +14,5 @@ rich
 # PATCH START — Add web server deps
 fastapi
 uvicorn
+pydantic
 # PATCH END

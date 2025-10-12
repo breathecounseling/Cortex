@@ -1,0 +1,1 @@
+from .google_kg import can_handle, describe_capabilities, handle  # noqa

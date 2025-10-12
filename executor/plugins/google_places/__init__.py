@@ -1,0 +1,1 @@
+from .google_places import can_handle, describe_capabilities, handle  # noqa

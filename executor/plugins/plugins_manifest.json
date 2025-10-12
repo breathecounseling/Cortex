@@ -1,0 +1,20 @@
+{
+  "plugins": [
+    "executor.plugins.builder",
+    "executor.plugins.extend_plugin",
+    "executor.plugins.repo_analyzer",
+    "executor.plugins.calendar_plugin",
+    "executor.plugins.phalanx.tasks",
+    "executor.plugins.server",
+    "executor.plugins.user_preferences",
+    "executor.plugins.full_cycle_plugin",
+    "executor.plugins.cortex.self_tasks",
+    "executor.plugins.task_planner"
+    "executor.plugins.web_search",
+    "executor.plugins.feedback"
+    "executor.plugins.google_kg",
+    "executor.plugins.google_places",
+    "executor.plugins.weather_plugin",
+    "executor.plugins.innovation_engine"
+  ]
+}

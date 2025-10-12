@@ -1,4 +1,29 @@
 from __future__ import annotations
+# PATCH START: deterministic plugin manifest support
+import json
+from pathlib import Path
+
+def _load_manifest_plugins() -> list[str]:
+    manifest_path = Path(__file__).parent.parent / "plugins" / "plugins_manifest.json"
+    if manifest_path.exists():
+        try:
+            data = json.loads(manifest_path.read_text())
+            plugins = data.get("plugins", [])
+            if plugins:
+                return plugins
+        except Exception:
+            pass
+    return []
+
+# integrate into existing discovery logic
+manifest_plugins = _load_manifest_plugins()
+if manifest_plugins:
+    discovered_plugins = manifest_plugins
+else:
+    # existing directory scanning logic follows unchanged
+    discovered_plugins = _scan_plugins_directory()
+# PATCH END
+
 from importlib import import_module
 from pathlib import Path
 import json, sys, importlib
