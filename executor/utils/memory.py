@@ -8,7 +8,8 @@ from typing import Any, Dict, Optional, List
 # Database setup
 # ---------------------------------------------------------------------------
 
-DB_PATH = Path(__file__).parent / "memory.db"
+# Store memory on the persistent /data volume so context survives restarts
+DB_PATH = Path("/data") / "memory.db"
 
 
 def init_db():
