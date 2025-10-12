@@ -3,6 +3,7 @@ from typing import Any, Dict
 from pathlib import Path
 import json, time
 from executor.core.intent import infer_intent
+from executor.utils.memory import list_facts
 
 # ---------------------------------------------------------------------------
 # Simple on-disk cache for intent classification
@@ -58,6 +59,23 @@ def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
 def _normalize_text(text: Any) -> str:
     return ("" if text is None else str(text)).strip()
 
+def _resolve_facts_in_text(text: str) -> str:
+    """Replace pronouns/placeholders with known facts so plugins can act on them."""
+    try:
+        facts = list_facts()
+        for key, val in facts.items():
+            lowkey = key.lower().strip()
+            if lowkey in ("live in", "location", "where i live", "city"):
+                text = text.replace("where I live", val)
+                text = text.replace("my city", val)
+            elif lowkey in ("favorite color", "color"):
+                text = text.replace("my favorite color", val)
+            elif lowkey in ("name", "my name"):
+                text = text.replace("my name", val)
+        return text
+    except Exception:
+        return text
+
 # ---------------------------------------------------------------------------
 # Main route function
 # ---------------------------------------------------------------------------
@@ -68,10 +86,10 @@ def route(
     directives: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    LLM-driven intent router with caching and confidence gating.
-    Uses core.intent.infer_intent() to classify messages and decide which plugin to call.
+    LLM-driven intent router with caching, fact resolution, and confidence gating.
     """
     text = _normalize_text(user_text)
+    text = _resolve_facts_in_text(text)
     directives = directives or {}
     if not text:
         return _base_response("How can I help?")
@@ -79,21 +97,11 @@ def route(
     # Try cached plan first
     plan = _get_cached_intent(text)
     if not plan:
-        # Describe available plugins for the intent model
         available_plugins = {
-            "web_search": {
-                "description": "Perform general or factual web and news searches."
-            },
-            "weather_plugin": {
-                "description": "Get current or forecasted weather data."
-            },
-            "google_places": {
-                "description": "Find nearby businesses, attractions, or places."
-            },
-            # ⬇️  Restrict feedback so only explicit feedback phrases trigger it
-            "feedback": {
-                "description": "Record explicit feedback about Cortex's performance or user experience; ignore normal conversation."
-            },
+            "web_search": {"description": "Perform general or factual web/news searches."},
+            "weather_plugin": {"description": "Get current or forecasted weather data."},
+            "google_places": {"description": "Find nearby businesses, attractions, or places."},
+            "feedback": {"description": "Record explicit feedback about Cortex's performance."},
         }
         plan = infer_intent(text, available_plugins)
         _set_cached_intent(text, plan)
