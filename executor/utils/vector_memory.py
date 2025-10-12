@@ -22,19 +22,17 @@ def init_vector_db():
         conn.commit()
 
 def embed(text: str) -> bytes:
-    """Get a compact embedding and store as bytes."""
     vec = client.embeddings.create(model="text-embedding-3-small", input=text).data[0].embedding
     return np.array(vec, dtype=np.float32).tobytes()
 
 def store_vector(role: str, text: str):
     init_vector_db()
     with _connect() as conn:
-        conn.execute("INSERT INTO vectors (role, content, vector) VALUES (?, ?, ?)",
+        conn.execute("INSERT INTO vectors (role, content, vector) VALUES (?,?,?)",
                      (role, text, embed(text)))
         conn.commit()
 
 def search_similar(query: str, top_k: int = 5) -> list[str]:
-    """Return top_k most similar stored contents."""
     init_vector_db()
     qvec = np.frombuffer(embed(query), dtype=np.float32)
     results = []
@@ -46,8 +44,24 @@ def search_similar(query: str, top_k: int = 5) -> list[str]:
     results.sort(reverse=True)
     return [f"{r[1]}: {r[2]}" for r in results[:top_k]]
 
-# PATCH START — add summary storage helper
-def store_summary(summary_text: str):
-    """Store a semantic summary block into the vector DB."""
-    store_vector("summary", summary_text)
-# PATCH END
+def summarize_if_needed(limit: int = 100):
+    with _connect() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
+        if count <= limit:
+            return
+        rows = conn.execute("SELECT id, content FROM vectors ORDER BY id ASC LIMIT 20").fetchall()
+        text = "\n".join([r[1] for r in rows])
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Summarize key ideas in concise bullet points."},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=200,
+        )
+        summary = resp.choices[0].message.content.strip()
+        conn.execute("DELETE FROM vectors WHERE id IN (SELECT id FROM vectors ORDER BY id ASC LIMIT 20)")
+        conn.execute("INSERT INTO vectors (role, content, vector) VALUES (?,?,?)",
+                     ("summary", summary, embed(summary)))
+        conn.commit()
