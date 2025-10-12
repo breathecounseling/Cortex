@@ -12,6 +12,11 @@ _FACTS_HINT = re.compile(
     re.IGNORECASE,
 )
 
+_WEATHER_HINT = re.compile(r"\b(weather|forecast|temperature)\b", re.I)
+_NEAR_HINT = re.compile(r"\b(near\s+me|coffee|restaurant|cafe|attraction)\b", re.I)
+_WHO_HINT = re.compile(r"^\s*(who|what|where)\b", re.I)
+
+
 def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
     return {
         "assistant_message": msg,
@@ -24,15 +29,27 @@ def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
         "actions": [],
     }
 
+
 def _normalize_text(text: Any) -> str:
     return ("" if text is None else str(text)).strip()
 
-def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | None = None) -> Dict[str, Any]:
+
+def route(
+    user_text: Any,
+    session: str = "repl",
+    directives: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """
+    Main router entrypoint used by REPL, API, and tests.
+    Decides which plugin (if any) should handle a message,
+    otherwise defers to the brain for conversational replies.
+    """
     text = _normalize_text(user_text)
     directives = directives or {}
     if not text:
         return _base_response("How can I help?")
 
+    # ---- [idea] capture ----
     m_idea = _IDEA_HINT.match(text)
     if m_idea:
         idea_title = m_idea.group(1).strip() or "New idea"
@@ -41,6 +58,7 @@ def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | No
         resp["tasks_to_add"].append(f"[idea] {idea_title}")
         return resp
 
+    # ---- [fact] capture ----
     m_fact = _FACTS_HINT.match(text)
     if m_fact:
         key = m_fact.group("key").strip()
@@ -49,29 +67,36 @@ def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | No
         resp["facts_to_save"].append({"key": key, "value": val})
         return resp
 
+    # ---- Generic "search / find / weather / news / near me" keywords ----
     if _SEARCH_HINTS.search(text):
         resp = _base_response(f"Searching the web for: {text}", mode="execute")
-        resp["actions"].append({"plugin": "web_search", "status": "ready", "args": {"query": text}})
+        resp["actions"].append(
+            {"plugin": "web_search", "status": "ready", "args": {"query": text}}
+        )
         return resp
 
-    # Phase 2.5 quick intent routing (ALL inside route)
-    _WEATHER_HINT = re.compile(r"\b(weather|forecast|temperature)\b", re.I)
-    _NEAR_HINT = re.compile(r"\b(near\s+me|coffee|restaurant|cafe|attraction)\b", re.I)
-    _WHO_HINT = re.compile(r"^\s*(who|what|where)\b", re.I)
-
+    # ---- Quick-intent routing ----
     if _WEATHER_HINT.search(text):
         resp = _base_response(f"Checking weather for: {text}", mode="execute")
-        resp["actions"].append({"plugin": "weather_plugin", "status": "ready", "args": {"query": text}})
+        resp["actions"].append(
+            {"plugin": "weather_plugin", "status": "ready", "args": {"query": text}}
+        )
         return resp
 
     if _NEAR_HINT.search(text):
         resp = _base_response(f"Searching nearby: {text}", mode="execute")
-        resp["actions"].append({"plugin": "google_places", "status": "ready", "args": {"query": text}})
+        resp["actions"].append(
+            {"plugin": "google_places", "status": "ready", "args": {"query": text}}
+        )
         return resp
 
     if _WHO_HINT.search(text):
-        resp = _base_response(f"Looking up entity: {text}", mode="execute")
-        resp["actions"].append({"plugin": "google_kg", "status": "ready", "args": {"query": text}})
+        # Route 'who/what/where' directly to custom search instead of KG
+        resp = _base_response(f"Searching the web for: {text}", mode="execute")
+        resp["actions"].append(
+            {"plugin": "web_search", "status": "ready", "args": {"query": text}}
+        )
         return resp
 
+    # ---- Default fallback → handled by brain ----
     return _base_response("Okay — let me think about that.")
