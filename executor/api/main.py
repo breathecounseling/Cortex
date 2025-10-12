@@ -1,3 +1,4 @@
+# executor/api/main.py
 from __future__ import annotations
 import os, re, json
 from pathlib import Path
@@ -8,6 +9,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# Core router + plugins
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
@@ -23,7 +25,12 @@ from executor.utils.memory import (
     save_fact,
     list_facts,
 )
-from executor.utils.vector_memory import store_vector, summarize_if_needed
+from executor.utils.vector_memory import (
+    store_vector,
+    summarize_if_needed,
+    retrieve_topic_summaries,
+    hierarchical_recall,
+)
 
 app = FastAPI()
 
@@ -74,6 +81,40 @@ def substitute_facts_in_text(text: str) -> str:
         return text
 
 
+def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
+    """Assemble working context with recent turns, facts, summaries, and long-term recall."""
+    try:
+        init_db_if_needed()
+        context = recall_context(limit=8)
+        context = inject_facts(context)
+
+        # ---- Add long-term memory summaries ----
+        summaries = retrieve_topic_summaries(query, k=3)
+        if summaries:
+            context.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": "Relevant history summaries:\n" + "\n".join(summaries),
+                },
+            )
+
+        # ---- Add deeper references from hierarchical recall ----
+        deep_refs = hierarchical_recall(query, k_vols=2, k_refs=3)
+        if deep_refs:
+            context.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": "Detailed references:\n" + "\n".join(deep_refs),
+                },
+            )
+
+        return context
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -107,9 +148,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # ---- 🧠  No plugin actions → brain + memory ----
     if not actions:
         try:
-            init_db_if_needed()
-            context = recall_context(limit=6)
-            context = inject_facts(context)
+            # initialize memory and full retrieval context
+            context = build_context_with_retrieval(text)
         except Exception:
             context = []
 
@@ -122,12 +162,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # ---- Generate reply ----
         try:
             reply = brain_chat(text, context=context)
         except Exception as e:
             reply = f"(brain offline) {e}"
 
-        # record exchanges + vectors (best-effort)
+        # ---- Record exchanges + vectors (best-effort) ----
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
@@ -161,8 +202,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         # 🧠 reflection: if plugin output is empty or terse, rewrite via brain w/ context
         if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
             try:
-                context = recall_context(limit=6)
-                context = inject_facts(context)
+                context = build_context_with_retrieval(text)
                 reply = brain_chat(
                     f"{text}\n\nPlugin output:\n{summary}\n\n"
                     "Respond conversationally or fill in any missing information.",
