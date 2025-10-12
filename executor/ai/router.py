@@ -20,15 +20,30 @@ def _pick_model(boost: bool) -> str:
     return DEFAULT_MODEL
 
 
-def respond(text: str, boost: bool = False, system: str | None = None, **kwargs: Any) -> str:
+def respond(text: str, boost: bool = False, system: str | None = None,
+            context: list[Dict[str, str]] | None = None, **kwargs: Any) -> str:
     """
-    Unified chat response handler.
-    Uses Chat Completions API with the chosen model.
+    Unified chat response handler with memory/context awareness.
     """
     model = _pick_model(boost)
     messages: List[Dict[str, str]] = []
+
     if system:
         messages.append({"role": "system", "content": system})
+
+    # ✅ include prior context turns in the conversation
+    if context:
+        # ensure context is a list of {role, content}
+        for m in context:
+            if isinstance(m, dict) and "role" in m and "content" in m:
+                messages.append(m)
+            elif isinstance(m, (list, tuple)) and len(m) == 2:
+                role, content = m
+                messages.append({"role": role, "content": content})
+            else:
+                messages.append({"role": "system", "content": str(m)})
+
+    # add current user message
     messages.append({"role": "user", "content": text})
 
     resp = _client.chat.completions.create(model=model, messages=messages, **kwargs)
@@ -39,7 +54,6 @@ def respond(text: str, boost: bool = False, system: str | None = None, **kwargs:
             [c.get("text", "") if isinstance(c, dict) else str(c) for c in content]
         )
     return content
-
 
 # PATCH START — backward-compatible wrapper for older imports
 def chat(text: str, boost: bool = False, system: str | None = None, **kwargs: Any) -> str:
