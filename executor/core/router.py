@@ -30,7 +30,6 @@ def _get_cached_intent(text: str) -> Dict[str, Any] | None:
     entry = cache.get(text)
     if not entry:
         return None
-    # discard if expired
     if time.time() - entry.get("ts", 0) > _CACHE_TTL:
         return None
     return entry.get("plan")
@@ -41,7 +40,7 @@ def _set_cached_intent(text: str, plan: Dict[str, Any]) -> None:
     _save_cache(cache)
 
 # ---------------------------------------------------------------------------
-# Base router helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
@@ -69,7 +68,7 @@ def route(
     directives: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    LLM-driven intent router with caching.
+    LLM-driven intent router with caching and confidence gating.
     Uses core.intent.infer_intent() to classify messages and decide which plugin to call.
     """
     text = _normalize_text(user_text)
@@ -82,10 +81,19 @@ def route(
     if not plan:
         # Describe available plugins for the intent model
         available_plugins = {
-            "web_search": {"description": "Perform general web and news searches."},
-            "weather_plugin": {"description": "Get current or forecasted weather data."},
-            "google_places": {"description": "Find nearby businesses or attractions."},
-            "feedback": {"description": "Store or summarize user feedback."},
+            "web_search": {
+                "description": "Perform general or factual web and news searches."
+            },
+            "weather_plugin": {
+                "description": "Get current or forecasted weather data."
+            },
+            "google_places": {
+                "description": "Find nearby businesses, attractions, or places."
+            },
+            # ⬇️  Restrict feedback so only explicit feedback phrases trigger it
+            "feedback": {
+                "description": "Record explicit feedback about Cortex's performance or user experience; ignore normal conversation."
+            },
         }
         plan = infer_intent(text, available_plugins)
         _set_cached_intent(text, plan)
@@ -93,9 +101,10 @@ def route(
     plugin = plan.get("target_plugin", "none")
     params = plan.get("parameters", {})
     intent = plan.get("intent", "freeform.respond")
+    confidence = float(plan.get("confidence", 1.0)) if isinstance(plan.get("confidence"), (int, float, str)) else 1.0
 
-    # ---- Route to plugin if chosen ----
-    if plugin and plugin != "none":
+    # ---- Confidence gating & plugin dispatch ----
+    if plugin and plugin != "none" and confidence >= 0.75:
         resp = _base_response(f"Routing to {plugin}", mode="execute")
         resp["actions"].append(
             {"plugin": plugin, "status": "ready", "args": params or {"query": text}}
