@@ -47,7 +47,7 @@ class ChatBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helper functions
 # ---------------------------------------------------------------------------
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
     """Prepend known user facts to context so the brain always sees them."""
@@ -56,13 +56,10 @@ def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
         if facts:
             context.insert(
                 0,
-                {
-                    "role": "system",
-                    "content": f"Known user facts: {json.dumps(facts)}",
-                },
+                {"role": "system", "content": f"Known user facts: {json.dumps(facts)}"},
             )
-    except Exception:
-        pass
+    except Exception as e:
+        print("[InjectFactsError]", e)
     return context
 
 
@@ -73,22 +70,42 @@ def substitute_facts_in_text(text: str) -> str:
         for key, val in facts.items():
             lowkey = key.lower()
             if any(x in lowkey for x in ("live", "city", "location")):
-                text = re.sub(r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b", val, text, flags=re.I)
+                text = re.sub(
+                    r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b",
+                    val,
+                    text,
+                    flags=re.I,
+                )
             elif "color" in lowkey:
-                text = re.sub(r"\b(my\s+favorite\s+color|favorite\s+color)\b", val, text, flags=re.I)
+                text = re.sub(
+                    r"\b(my\s+favorite\s+color|favorite\s+color)\b",
+                    val,
+                    text,
+                    flags=re.I,
+                )
         return text
-    except Exception:
+    except Exception as e:
+        print("[SubstituteFactsError]", e)
         return text
 
 
 def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
     """Assemble working context with recent turns, facts, summaries, and long-term recall."""
+    context: list[dict[str, str]] = []
+
+    # --- core recall ---
     try:
         init_db_if_needed()
         context = recall_context(limit=8)
-        context = inject_facts(context)
+    except Exception as e:
+        print("[ContextRecallError]", e)
+        context = []
 
-        # ---- Add long-term memory summaries ----
+    # --- facts: always inject even if recall failed ---
+    context = inject_facts(context)
+
+    # --- summaries ---
+    try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
             context.insert(
@@ -98,8 +115,11 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
                     "content": "Relevant history summaries:\n" + "\n".join(summaries),
                 },
             )
+    except Exception as e:
+        print("[VectorMemorySummaryError]", e)
 
-        # ---- Add deeper references from hierarchical recall ----
+    # --- deep recall ---
+    try:
         deep_refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if deep_refs:
             context.insert(
@@ -109,10 +129,10 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
                     "content": "Detailed references:\n" + "\n".join(deep_refs),
                 },
             )
+    except Exception as e:
+        print("[VectorMemoryDetailError]", e)
 
-        return context
-    except Exception:
-        return []
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +150,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         raw = await request.json()
     except Exception:
         raw = {}
-    text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
+    text = (
+        body.text
+        or raw.get("message")
+        or raw.get("prompt")
+        or raw.get("content")
+        or ""
+    ).strip()
     if not text:
         return {"reply": "How can I help?"}
 
@@ -147,20 +173,20 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     # ---- 🧠  No plugin actions → brain + memory ----
     if not actions:
-        try:
-            # initialize memory and full retrieval context
-            context = build_context_with_retrieval(text)
-        except Exception:
-            context = []
+        # Build full retrieval context
+        context = build_context_with_retrieval(text)
 
         # 💾 capture new facts like "My X is Y"
         try:
-            fact_match = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=)\s+(.+)", text, re.I)
+            fact_match = re.search(
+                r"\bmy\s+([\w\s]+?)\s+(?:is|was|=)\s+(.+)", text, re.I
+            )
             if fact_match:
                 key, val = fact_match.groups()
-                save_fact(key.strip().lower(), val.strip())
-        except Exception:
-            pass
+                key = key.strip().lower().replace("favourite", "favorite")
+                save_fact(key, val.strip())
+        except Exception as e:
+            print("[FactCaptureError]", e)
 
         # ---- Generate reply ----
         try:
@@ -175,8 +201,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             store_vector("user", text)
             store_vector("assistant", reply)
             summarize_if_needed()
-        except Exception:
-            pass
+        except Exception as e:
+            print("[VectorStoreError]", e)
 
         return {"reply": reply}
 
@@ -195,12 +221,17 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         elif plugin == "feedback":
             result = feedback.handle(args)
         else:
-            result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
+            result = {
+                "status": "ok",
+                "summary": router_output.get("assistant_message", "Okay."),
+            }
 
         summary = result.get("summary") or ""
 
         # 🧠 reflection: if plugin output is empty or terse, rewrite via brain w/ context
-        if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
+        if len(summary.strip()) < 40 or summary.lower().startswith(
+            ("no ", "error", "none")
+        ):
             try:
                 context = build_context_with_retrieval(text)
                 reply = brain_chat(
@@ -209,8 +240,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                     context=context,
                 )
                 return {"reply": reply}
-            except Exception:
-                pass
+            except Exception as e:
+                print("[ReflectionError]", e)
 
         return {"reply": summary}
     except Exception as e:
