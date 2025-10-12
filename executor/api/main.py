@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os
+import os, re, json
 from pathlib import Path
 from typing import Any, Dict
 
@@ -16,7 +16,13 @@ from executor.plugins.feedback import feedback
 
 # 🧠 Brain + memory
 from executor.ai.router import chat as brain_chat
-from executor.utils.memory import init_db_if_needed, recall_context, remember_exchange
+from executor.utils.memory import (
+    init_db_if_needed,
+    recall_context,
+    remember_exchange,
+    save_fact,
+    list_facts,
+)
 from executor.utils.vector_memory import store_vector, summarize_if_needed
 
 app = FastAPI()
@@ -60,11 +66,33 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # ---- 🧠  If no plugin actions, fall back to brain + memory ----
     if not actions:
         try:
-            # initialize memory and recall context
             init_db_if_needed()
             context = recall_context(limit=6)
         except Exception:
             context = []
+
+        # 💾 inject stored user facts as part of context
+        try:
+            facts = list_facts()
+            if facts:
+                context.insert(
+                    0,
+                    {
+                        "role": "system",
+                        "content": f"Known user facts: {json.dumps(facts)}",
+                    },
+                )
+        except Exception:
+            pass
+
+        # 💾 capture new facts like "My X is Y"
+        try:
+            fact_match = re.match(r"\bmy\s+([\w\s]+?)\s+is\s+(.+)", text, re.I)
+            if fact_match:
+                key, val = fact_match.groups()
+                save_fact(key.strip().lower(), val.strip())
+        except Exception:
+            pass
 
         try:
             reply = brain_chat(text, context=context)
@@ -91,18 +119,28 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
         if plugin == "web_search":
             result = web_search.handle(args)
-            return {"reply": result.get("summary", "No search results.")}
         elif plugin == "weather_plugin":
             result = weather_plugin.handle(args)
-            return {"reply": result.get("summary", "No weather data.")}
         elif plugin == "google_places":
             result = google_places.handle(args)
-            return {"reply": result.get("summary", "No nearby places found.")}
         elif plugin == "feedback":
             result = feedback.handle(args)
-            return {"reply": result.get("message", "Feedback noted.")}
         else:
-            return {"reply": router_output.get("assistant_message", "Okay.")}
+            result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
+
+        # 🧠 reflection: if plugin output is empty or non-conversational, rewrite via brain
+        summary = result.get("summary") or ""
+        if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
+            try:
+                reply = brain_chat(
+                    f"{text}\n\nPlugin output:\n{summary}\n\n"
+                    "Respond conversationally or fill in any missing information."
+                )
+                return {"reply": reply}
+            except Exception:
+                pass
+
+        return {"reply": summary}
     except Exception as e:
         return {"reply": f"Plugin error ({plugin}): {e}"}
 
