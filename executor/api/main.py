@@ -39,6 +39,44 @@ class ChatBody(BaseModel):
     system: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Prepend known user facts to context so the brain always sees them."""
+    try:
+        facts = list_facts()
+        if facts:
+            context.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": f"Known user facts: {json.dumps(facts)}",
+                },
+            )
+    except Exception:
+        pass
+    return context
+
+
+def substitute_facts_in_text(text: str) -> str:
+    """Replace placeholders (my city, where I live, etc.) with stored facts for plugins."""
+    try:
+        facts = list_facts()
+        for key, val in facts.items():
+            lowkey = key.lower()
+            if any(x in lowkey for x in ("live", "city", "location")):
+                text = re.sub(r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b", val, text, flags=re.I)
+            elif "color" in lowkey:
+                text = re.sub(r"\b(my\s+favorite\s+color|favorite\s+color)\b", val, text, flags=re.I)
+        return text
+    except Exception:
+        return text
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Cortex API is running."}
@@ -55,6 +93,9 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
+    # Apply substitutions early
+    text = substitute_facts_in_text(text)
+
     # ---- ROUTER PHASE ----
     try:
         router_output = route(text)
@@ -63,31 +104,18 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
 
-    # ---- 🧠  If no plugin actions, fall back to brain + memory ----
+    # ---- 🧠  No plugin actions → brain + memory ----
     if not actions:
         try:
             init_db_if_needed()
             context = recall_context(limit=6)
+            context = inject_facts(context)
         except Exception:
             context = []
 
-        # 💾 inject stored user facts into system context
-        try:
-            facts = list_facts()
-            if facts:
-                context.insert(
-                    0,
-                    {
-                        "role": "system",
-                        "content": f"Known user facts: {json.dumps(facts)}",
-                    },
-                )
-        except Exception:
-            pass
-
         # 💾 capture new facts like "My X is Y"
         try:
-            fact_match = re.match(r"\bmy\s+([\w\s]+?)\s+is\s+(.+)", text, re.I)
+            fact_match = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=)\s+(.+)", text, re.I)
             if fact_match:
                 key, val = fact_match.groups()
                 save_fact(key.strip().lower(), val.strip())
@@ -128,13 +156,17 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         else:
             result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
 
-        # 🧠 reflection: if plugin output is thin or non-conversational, rewrite via brain
         summary = result.get("summary") or ""
+
+        # 🧠 reflection: if plugin output is empty or terse, rewrite via brain w/ context
         if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
             try:
+                context = recall_context(limit=6)
+                context = inject_facts(context)
                 reply = brain_chat(
                     f"{text}\n\nPlugin output:\n{summary}\n\n"
-                    "Respond conversationally or fill in any missing information."
+                    "Respond conversationally or fill in any missing information.",
+                    context=context,
                 )
                 return {"reply": reply}
             except Exception:
