@@ -16,10 +16,10 @@ import executor.plugins.google_kg.google_kg as google_kg
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 
-# 🧠 Brain + memory imports
+# 🧠 Brain + memory imports (validated 2.6b set)
 from executor.ai.router import chat as brain_chat
 from executor.utils.memory import init_db_if_needed, recall_context, remember_exchange
-from executor.utils.vector_memory import store_vector, summarize_if_needed
+from executor.utils.vector_memory import store_vector   # removed summarize_if_needed
 
 app = FastAPI()
 
@@ -78,7 +78,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             remember_exchange("assistant", reply)
             store_vector("user", text)
             store_vector("assistant", reply)
-            summarize_if_needed()
+            # summarize_if_needed()  ← removed, not part of 2.6b baseline
         except Exception:
             pass
 
