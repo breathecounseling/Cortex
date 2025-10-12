@@ -1,3 +1,4 @@
+# executor/core/router.py
 from __future__ import annotations
 from typing import Any, Dict
 from pathlib import Path
@@ -5,12 +6,12 @@ import json, time, re
 from executor.core.intent import infer_intent
 from executor.utils.memory import list_facts
 
+# ---------------------------------------------------------------------------
+# Simple on-disk cache for intent classification
+# ---------------------------------------------------------------------------
 _CACHE_PATH = Path("/data") / "intent_cache.json"
-_CACHE_TTL = 3600  # 1 hour
+_CACHE_TTL = 3600  # seconds (1 hour)
 
-# ---------------------------------------------------------------------------
-# Cache helpers
-# ---------------------------------------------------------------------------
 def _load_cache() -> Dict[str, Dict[str, Any]]:
     try:
         if _CACHE_PATH.exists():
@@ -40,7 +41,7 @@ def _set_cached_intent(text: str, plan: Dict[str, Any]) -> None:
     _save_cache(cache)
 
 # ---------------------------------------------------------------------------
-# Utilities
+# Helpers
 # ---------------------------------------------------------------------------
 def _base_response(msg: str, mode: str = "chat") -> Dict[str, Any]:
     return {
@@ -58,25 +59,18 @@ def _normalize_text(text: Any) -> str:
     return ("" if text is None else str(text)).strip()
 
 def _resolve_facts_in_text(text: str) -> str:
-    """Replace pronouns/placeholders with stored facts so plugins get real values."""
+    """Replace pronouns/placeholders with known facts so plugins can act on them."""
     try:
         facts = list_facts()
-        low = text.lower()
-
-        # --- replace city/location ---
-        for k, v in facts.items():
-            lk = k.lower()
-            if any(x in lk for x in ("live", "location", "city")):
-                text = re.sub(r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b", v, text, flags=re.I)
-
-        # --- replace favorite color ---
-        for k, v in facts.items():
-            lk = k.lower()
-            if "color" in lk:
-                text = re.sub(r"\b(my\s+favorite\s+color|favorite\s+color)\b", v, text, flags=re.I)
-
-        # --- replace other simple pronouns ---
-        text = text.replace("my location", facts.get("live in", facts.get("location", "")))
+        for key, val in facts.items():
+            lowkey = key.lower().strip()
+            if lowkey in ("live in", "location", "where i live", "city"):
+                text = text.replace("where I live", val)
+                text = text.replace("my city", val)
+            elif lowkey in ("favorite color", "color"):
+                text = text.replace("my favorite color", val)
+            elif lowkey in ("name", "my name"):
+                text = text.replace("my name", val)
         return text
     except Exception:
         return text
@@ -84,9 +78,13 @@ def _resolve_facts_in_text(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Main router
 # ---------------------------------------------------------------------------
-def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def route(
+    user_text: Any,
+    session: str = "repl",
+    directives: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """
-    Intent router with caching, fact resolution, and pronoun-aware gating.
+    LLM-driven intent router with caching, fact resolution, and pronoun-aware gating.
     """
     text = _normalize_text(user_text)
     text = _resolve_facts_in_text(text)
@@ -94,13 +92,13 @@ def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | No
     if not text:
         return _base_response("How can I help?")
 
-    # --- keep contextual questions in brain layer ---
-    if re.search(r"\b(my|i|me|mine)\b", text.lower()):
-        # questions about self ("Who is the mayor of my city?") stay in brain
-        if any(x in text.lower() for x in ("who", "what", "where")):
+    # --- SELF-REFERENCE OVERRIDE (restored from 2.7-green) ---
+    # If user asks about themselves, keep it in brain/memory path
+    if re.search(r"\b(my|mine|i|me)\b", text.lower()):
+        if any(q in text.lower() for q in ("what", "who", "where", "when")):
             return _base_response("Okay — let me think about that.")
 
-    # --- try cache ---
+    # --- Try cached plan first ---
     plan = _get_cached_intent(text)
     if not plan:
         available_plugins = {
@@ -114,11 +112,17 @@ def route(user_text: Any, session: str = "repl", directives: Dict[str, Any] | No
 
     plugin = plan.get("target_plugin", "none")
     params = plan.get("parameters", {})
-    confidence = float(plan.get("confidence", 1.0)) if isinstance(plan.get("confidence"), (int, float, str)) else 1.0
+    confidence = float(plan.get("confidence", 1.0)) if isinstance(
+        plan.get("confidence"), (int, float, str)
+    ) else 1.0
 
+    # --- Confidence gating & plugin dispatch ---
     if plugin and plugin != "none" and confidence >= 0.75:
         resp = _base_response(f"Routing to {plugin}", mode="execute")
-        resp["actions"].append({"plugin": plugin, "status": "ready", "args": params or {"query": text}})
+        resp["actions"].append(
+            {"plugin": plugin, "status": "ready", "args": params or {"query": text}}
+        )
         return resp
 
-    return _base_response("Okay — let me think about that.") 
+    # --- Default fallback → handled by brain ---
+    return _base_response("Okay — let me think about that.")
