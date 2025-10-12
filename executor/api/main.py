@@ -71,7 +71,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         except Exception:
             context = []
 
-        # 💾 inject stored user facts as part of context
+        # 💾 inject stored user facts into system context
         try:
             facts = list_facts()
             if facts:
@@ -128,7 +128,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         else:
             result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
 
-        # 🧠 reflection: if plugin output is empty or non-conversational, rewrite via brain
+        # 🧠 reflection: if plugin output is thin or non-conversational, rewrite via brain
         summary = result.get("summary") or ""
         if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
             try:
