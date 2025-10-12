@@ -1,4 +1,3 @@
-# executor/ai/router.py
 from __future__ import annotations
 import os
 from typing import Any, Dict, List
@@ -19,21 +18,13 @@ def _pick_model(boost: bool) -> str:
         return BOOST_MODEL
     return DEFAULT_MODEL
 
-
 def respond(text: str, boost: bool = False, system: str | None = None,
-            context: list[Dict[str, str]] | None = None, **kwargs: Any) -> str:
-    """
-    Unified chat response handler with memory/context awareness.
-    """
+            context: list[dict[str, str]] | None = None, **kwargs: Any) -> str:
     model = _pick_model(boost)
     messages: List[Dict[str, str]] = []
-
     if system:
         messages.append({"role": "system", "content": system})
-
-    # ✅ include prior context turns in the conversation
     if context:
-        # ensure context is a list of {role, content}
         for m in context:
             if isinstance(m, dict) and "role" in m and "content" in m:
                 messages.append(m)
@@ -42,10 +33,7 @@ def respond(text: str, boost: bool = False, system: str | None = None,
                 messages.append({"role": role, "content": content})
             else:
                 messages.append({"role": "system", "content": str(m)})
-
-    # add current user message
     messages.append({"role": "user", "content": text})
-
     resp = _client.chat.completions.create(model=model, messages=messages, **kwargs)
     msg = resp.choices[0].message
     content = getattr(msg, "content", "") or ""
@@ -55,11 +43,6 @@ def respond(text: str, boost: bool = False, system: str | None = None,
         )
     return content
 
-# PATCH START — backward-compatible wrapper for older imports
-def chat(text: str, boost: bool = False, system: str | None = None, **kwargs: Any) -> str:
-    """
-    Legacy compatibility wrapper.
-    Mirrors respond() so existing API routes importing 'chat' won't break.
-    """
-    return respond(text, boost=boost, system=system, **kwargs)
-# PATCH END
+def chat(text: str, boost: bool = False, system: str | None = None,
+         context: list[dict[str, str]] | None = None, **kwargs: Any) -> str:
+    return respond(text, boost=boost, system=system, context=context, **kwargs)
