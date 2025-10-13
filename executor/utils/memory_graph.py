@@ -216,32 +216,21 @@ def extract_and_save_location(text: str) -> Optional[str]:
 def answer_location_question(text: str) -> Optional[str]:
     """
     Route location-like questions to the right scope.
-    Order: trip (if asking 'there' or planning), current, home.
+    Priority: trip > current > home.
     """
-    q = (text or "").lower().strip()
-    # prioritize "where am I" → current
-    if any(p in q for p in ["where am i", "where am i visiting", "current location", "where am i now"]):
-        n = get_node("location", "current", scope="current")
-        if n and n.get("value"):
-            return f"You're currently in {n['value']}."
-        # fallback to trip or home
-        t = get_node("location", "trip", scope="trip")
-        if t and t.get("value"):
-            return f"You're preparing to go to {t['value']}."
-        h = get_node("location", "home", scope="home")
-        if h and h.get("value"):
-            return f"Your home is {h['value']}."
-        return "I'm not sure where you are right now."
+    q = re.sub(r"[?.!]+$", "", (text or "").lower().strip())  # normalize
+    q = re.sub(r"\s+", " ", q)
 
-    # "where do i live" → home
-    if any(p in q for p in ["where do i live", "home location", "where is my home"]):
-        h = get_node("location", "home", scope="home")
-        if h and h.get("value"):
-            return f"You live in {h['value']}."
-        return "I'm not sure where you live."
-
-    # "where is my trip / there?" → trip
-    if any(p in q for p in ["where am i going", "trip destination", "where is my trip", "what's there", "what should i do there"]):
+    # --- TRIP questions first ---
+    if any(p in q for p in [
+        "where am i going",
+        "trip destination",
+        "where is my trip",
+        "what's there",
+        "what should i do there",
+        "what is my trip destination",
+        "where will i go"
+    ]):
         t = get_node("location", "trip", scope="trip")
         if t and t.get("value"):
             return f"Your trip destination is {t['value']}."
@@ -251,10 +240,41 @@ def answer_location_question(text: str) -> Optional[str]:
             return f"You're currently in {c['value']}."
         h = get_node("location", "home", scope="home")
         if h and h.get("value"):
-            return f"Your home is {h['value']}."
+            return f"You live in {h['value']}."
         return "I don't have a trip destination yet."
 
-    # generic "where" without explicit phrasing → try current → home
+    # --- CURRENT questions ---
+    if any(p in q for p in [
+        "where am i",
+        "where am i now",
+        "where am i visiting",
+        "where am i staying",
+        "current location",
+    ]):
+        c = get_node("location", "current", scope="current")
+        if c and c.get("value"):
+            return f"You're currently in {c['value']}."
+        t = get_node("location", "trip", scope="trip")
+        if t and t.get("value"):
+            return f"You're preparing to go to {t['value']}."
+        h = get_node("location", "home", scope="home")
+        if h and h.get("value"):
+            return f"You live in {h['value']}."
+        return "I'm not sure where you are right now."
+
+    # --- HOME questions ---
+    if any(p in q for p in [
+        "where do i live",
+        "home location",
+        "where is my home",
+        "my home",
+    ]):
+        h = get_node("location", "home", scope="home")
+        if h and h.get("value"):
+            return f"You live in {h['value']}."
+        return "I'm not sure where you live."
+
+    # --- fallback: generic "where" ---
     if q.startswith("where"):
         c = get_node("location", "current", scope="current")
         if c and c.get("value"):
