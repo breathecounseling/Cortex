@@ -1,7 +1,5 @@
-# executor/utils/memory.py
 from __future__ import annotations
-import json
-import sqlite3
+import json, re, sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
@@ -40,10 +38,7 @@ def init_db_if_needed():
 # ---------------------------------------------------------------------------
 
 def save_fact(key: str, value: str):
-    """
-    Save or update a simple key/value fact to memory.
-    If a fact with the same key already exists, overwrite it.
-    """
+    """Save or update a simple key/value fact to memory."""
     key = key.strip().lower()
     value = value.strip()
     init_db()
@@ -80,6 +75,7 @@ def load_fact(key: str) -> Optional[str]:
 
 
 def list_facts() -> Dict[str, str]:
+    """Return all stored facts."""
     init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -90,46 +86,50 @@ def list_facts() -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Conversational helpers for corrections
+# Conversational helpers for corrections & deletions
 # ---------------------------------------------------------------------------
 
 def update_or_delete_from_text(text: str):
     """
-    Detect user requests to delete or correct facts.
+    Detect and execute user requests to delete or correct facts.
     Supports both general ("forget that") and targeted ("forget my location") forms.
     """
     lowered = text.lower().strip()
 
-    # Targeted forget/delete: "forget my location", "delete my favorite color"
-    if re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered):
-        match = re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered)
-        if match:
-            key = match.group(3).strip().lower()
+    # --- Targeted forget/delete: e.g. "forget my location" or "delete favorite color"
+    try:
+        m = re.search(r"\b(forget|delete|remove|clear)\s+(?:my|the)?\s*([\w\s]+)", lowered)
+        if m:
+            key = m.group(2).strip().lower()
             print(f"[MemoryDelete] Targeted delete request for: {key}")
-            try:
-                delete_fact(key)
-                return {"action": "deleted", "key": key}
-            except Exception as e:
-                print(f"[MemoryDeleteError] {e}")
-                return {"action": "error", "key": key}
-    
-    # Generic forget
+            delete_fact(key)
+            return {"action": "deleted", "key": key}
+    except Exception as e:
+        print(f"[MemoryDeleteError] regex or delete failure: {e}")
+
+    # --- Generic forget last fact
     if any(p in lowered for p in ("forget that", "remove it", "delete that", "clear it")):
-        facts = list_facts()
-        if facts:
-            last_key = list(facts.keys())[-1]
-            delete_fact(last_key)
-            return {"action": "deleted", "key": last_key}
+        try:
+            facts = list_facts()
+            if facts:
+                last_key = list(facts.keys())[-1]
+                delete_fact(last_key)
+                return {"action": "deleted", "key": last_key}
+        except Exception as e:
+            print(f"[MemoryDeleteError] generic forget failed: {e}")
         return {"action": "none"}
 
-    # "I changed my mind" or "that's wrong"
-    if "changed my mind" in lowered or "that's wrong" in lowered or "no, it's" in lowered:
-        if "color" in lowered:
-            delete_fact("favorite color")
-            return {"action": "deleted", "key": "favorite color"}
-        if "location" in lowered:
-            delete_fact("location")
-            return {"action": "deleted", "key": "location"}
+    # --- "Changed my mind" or "that's wrong"
+    if any(p in lowered for p in ("changed my mind", "that's wrong", "no, it's")):
+        try:
+            if "color" in lowered:
+                delete_fact("favorite color")
+                return {"action": "deleted", "key": "favorite color"}
+            if "location" in lowered:
+                delete_fact("location")
+                return {"action": "deleted", "key": "location"}
+        except Exception as e:
+            print(f"[MemoryDeleteError] correction delete failed: {e}")
         return {"action": "deleted", "key": None}
 
     return {"action": "none"}
