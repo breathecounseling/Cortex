@@ -59,7 +59,7 @@ def _row_to_node(row: Tuple) -> Dict[str, Any]:
     }
 
 # ---------------------------------------------------------------------
-# CORE CRUD OPERATIONS
+# CORE CRUD
 # ---------------------------------------------------------------------
 def upsert_node(domain: str, key: str, value: str, scope: str = "global",
                 meta: Optional[Dict[str, Any]] = None) -> int:
@@ -123,14 +123,26 @@ def infer_location_key_and_scope(text: str) -> (Optional[str], Optional[str]):
     return (None, None)
 
 def detect_implicit_change(text: str) -> Optional[Dict[str, str]]:
-    """Detect phrasing that implies overwriting an existing fact."""
-    t = text.lower()
-    if re.search(r"\bmoved to\b|\brelocated to\b|\bnew home\b", t):
+    """Detect phrasing that implies overwriting an existing fact and extract value if possible."""
+    t = text.lower().strip()
+    # moved / relocated → home
+    m = re.search(r"\b(?:moved|relocated)\s+to\s+(?P<city>[\w\s,]+)", t)
+    if m:
+        city = sanitize_value(m.group("city"))
+        return {"domain": "location", "key": "home", "scope": "home", "value": city}
+    # new home without explicit 'to'
+    if re.search(r"\bnew home\b", t):
         return {"domain": "location", "key": "home", "scope": "home"}
-    if re.search(r"\bi['’]?m in\b|\bi am in\b|\bcurrently in\b", t):
-        return {"domain": "location", "key": "current", "scope": "current"}
-    if re.search(r"\bgoing to\b|\bheading to\b|\btrip to\b", t):
-        return {"domain": "location", "key": "trip", "scope": "trip"}
+    # "I'm in ..." → current
+    m = re.search(r"\bi['’]?m\s+in\s+(?P<city>[\w\s,]+)", t)
+    if m:
+        city = sanitize_value(m.group("city"))
+        return {"domain": "location", "key": "current", "scope": "current", "value": city}
+    # "going / heading / trip to ..." → trip
+    m = re.search(r"\b(?:going|heading|trip)\s+to\s+(?P<city>[\w\s,]+)", t)
+    if m:
+        city = sanitize_value(m.group("city"))
+        return {"domain": "location", "key": "trip", "scope": "trip", "value": city}
     return None
 
 def forget_fact_or_location(text: str) -> Optional[str]:
@@ -138,11 +150,16 @@ def forget_fact_or_location(text: str) -> Optional[str]:
     t = (text or "").lower().strip()
     m = _CHANGE_RX.search(t)
     if m:
-        key = m.group("key").strip().lower()
-        dom = detect_domain_from_key(key)
-        for scope in get_all_scopes_for_domain(dom):
-            delete_node(dom, key, scope)
-        return f"Got it — I've updated your {key}."
+        key = (m.groupdict().get("key") or "").strip().lower()
+        val = (m.groupdict().get("val") or "").strip()
+        dom = detect_domain_from_key(key or "color")  # fallback domain
+        scopes = get_all_scopes_for_domain(dom)
+        for scope in scopes:
+            delete_node(dom, key or "favorite color", scope)
+        if val:
+            upsert_node(dom, key or "favorite color", sanitize_value(val), scope=scopes[0])
+            return f"Got it — your {key or 'favorite color'} is {val}."
+        return f"Got it — I've updated your {key or 'fact'}."
 
     if "forget" in t:
         if any(w in t for w in ["trip", "home", "current", "city", "place", "location"]):
@@ -155,7 +172,6 @@ def forget_fact_or_location(text: str) -> Optional[str]:
                 for scope in get_all_scopes_for_domain(dom):
                     delete_node(dom, "*", scope)
                 return "Got it — I've cleared your saved locations."
-
         key = re.sub(r"forget\s+(my|the)\s+", "", t).strip()
         dom = detect_domain_from_key(key)
         for scope in get_all_scopes_for_domain(dom):
@@ -172,7 +188,6 @@ def detect_domain_from_key(key: str) -> str:
     if "color" in k: return "color"
     if "food" in k: return "food"
     if "location" in k or "home" in k or "trip" in k: return "location"
-    # automatic new domain
     dom = re.sub(r"[^a-z0-9_]+", "_", k.split()[0])
     print(f"[Graph] Auto-created domain: {dom}")
     return dom or "misc"
@@ -190,6 +205,9 @@ def extract_and_save_location(text: str) -> Optional[str]:
     change = detect_implicit_change(t)
     if change:
         delete_node(change["domain"], change["key"], change["scope"])
+        if change.get("value"):
+            upsert_node(change["domain"], change["key"], change["value"], scope=change["scope"])
+            return f"Got it — your {change['key']} location is {change['value']}."
     for rx, (key, scope, msg) in [
         (_LOC_HOME_RX, ("home", "home", "your home location")),
         (_LOC_CURR_RX, ("current", "current", "you're currently in")),
@@ -226,10 +244,28 @@ def answer_location_question(text: str) -> Optional[str]:
 # FACT / COLOR / FOOD / MISC
 # ---------------------------------------------------------------------
 _FACT_DECL_RX = re.compile(r"\bmy\s+(?P<key>[\w\s]+?)\s+(?:is|was|=|'s)\s+(?P<val>[^.?!]+)", re.I)
-_CHANGE_RX = re.compile(r"\b(i\s+changed\s+my\s+mind\s+about|no,\s*it's|actually\s+it's)\s+(?P<key>[\w\s]+)", re.I)
+# Extended change regex supports optional key and value
+_CHANGE_RX = re.compile(
+    r"\b(i\s+changed\s+my\s+mind(?:\s+about\s+(?P<key>[\w\s]+))?"
+    r"|no,\s*it'?s|actually\s+it'?s)\s+(?P<val>[^.?!]+)",
+    re.I,
+)
 
 def extract_and_save_fact(text: str) -> Optional[str]:
     """Detect fact statements and route them to appropriate or new domain."""
+    # Correction first
+    m_change = _CHANGE_RX.search(text or "")
+    if m_change:
+        key = (m_change.groupdict().get("key") or "").strip().lower()
+        val = m_change.groupdict().get("val").strip().rstrip(".!?")
+        dom = detect_domain_from_key(key or "color")
+        scopes = get_all_scopes_for_domain(dom)
+        for scope in scopes:
+            delete_node(dom, key or "favorite color", scope)
+        upsert_node(dom, key or "favorite color", sanitize_value(val), scope=scopes[0])
+        return f"Got it — your {key or 'favorite color'} is {val}."
+
+    # Standard declaration
     m = _FACT_DECL_RX.search(text or "")
     if not m:
         return None
