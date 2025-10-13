@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, List
 # Database setup
 # ---------------------------------------------------------------------------
 
-DB_PATH = Path(__file__).parent / "memory.db"
+DB_PATH = Path("/data") / "memory.db"
 
 
 def init_db():
