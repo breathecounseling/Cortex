@@ -56,9 +56,13 @@ def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
     try:
         facts = list_facts()
         if facts:
+            print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
             context.insert(
                 0,
-                {"role": "system", "content": f"Known user facts: {json.dumps(facts)}"},
+                {
+                    "role": "system",
+                    "content": f"Known user facts (authoritative): {json.dumps(facts)}",
+                },
             )
     except Exception as e:
         print("[InjectFactsError]", e)
@@ -102,7 +106,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # Facts first
+    # Always inject known facts first
     context = inject_facts(context)
 
     # Summaries
@@ -146,7 +150,7 @@ def root() -> Dict[str, Any]:
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    # Tolerate UI variations
+    """Main chat endpoint"""
     try:
         raw = await request.json()
     except Exception:
@@ -161,7 +165,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
-    # Substitute known facts into the query
+    # Substitute known facts into the query for plugin use
     text = substitute_facts_in_text(text)
 
     # ROUTER phase
@@ -178,7 +182,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             # detect corrections ("forget that", "changed my mind")
             update_or_delete_from_text(text)
 
-            # Capture new facts like "My X is Y"
+            # Capture new facts like "My X is Y" or "My X's Y"
             fact_match = re.search(
                 r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
                 text,
@@ -193,7 +197,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         except Exception as e:
             print("[FactCaptureError]", e)
 
-        # Build full context
+        # Build full context with facts, summaries, and history
         try:
             context = build_context_with_retrieval(text)
             reply = brain_chat(text, context=context)
