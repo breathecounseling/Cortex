@@ -149,11 +149,12 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             return {"reply": g_fact_confirm}
 
         # Semantic declaration
-        if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
-            domain = gmem.detect_domain_from_key(semantic["key"])
-            gmem.upsert_node(domain, semantic["key"], semantic["value"], scope="global")
-            print(f"[Graph] Upserted: {domain}.{semantic['key']} = {semantic['value']}")
-            return {"reply": f"Got it — your {semantic['key']} is {semantic['value']}."}
+if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
+    domain = gmem.detect_domain_from_key(semantic["key"])
+    value = sanitize_value(semantic["value"])
+    gmem.upsert_node(domain, semantic["key"], value, scope="global")
+    print(f"[Graph] Upserted: {domain}.{semantic['key']} = {value}")
+    return {"reply": f"Got it — your {semantic['key']} is {value}."}
 
         # Queries
         if semantic["type"] == "fact.query" and semantic.get("key"):
