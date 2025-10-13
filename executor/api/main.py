@@ -1,8 +1,7 @@
 from __future__ import annotations
 import os, re, json
 from pathlib import Path
-from typing import Any, Dict
-
+from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,16 +30,13 @@ from executor.utils.vector_memory import (
     retrieve_topic_summaries,
     hierarchical_recall,
 )
-from executor.core.language_intent import classify_language_intent
-
 
 app = FastAPI()
 
-# Mount built frontend if present
+# Mount built frontend
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
-
 
 class ChatBody(BaseModel):
     text: str | None = None
@@ -49,35 +45,41 @@ class ChatBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Helper utilities
 # ---------------------------------------------------------------------------
 
-def _summarize_facts_for_brain(facts: dict[str, str]) -> str:
-    """Turn key/value memory into conversational context text."""
-    if not facts:
-        return ""
-    lines = []
-    for k, v in facts.items():
-        lines.append(f"The user's {k} is {v}.")
-    return " ".join(lines)
+def normalize_fact_key(raw: str) -> list[str]:
+    """Generate possible key variants for flexible recall."""
+    raw = raw.lower().strip()
+    variants = {raw}
+    if raw.startswith("my "):
+        variants.add(raw[3:])
+        variants.add(raw.replace("my ", "your ", 1))
+    if raw.startswith("your "):
+        variants.add(raw[5:])
+        variants.add(raw.replace("your ", "my ", 1))
+    variants.add(raw.replace("favourite", "favorite"))
+    return list(variants)
+
+
+def get_fact_fuzzy(facts: dict[str, str], query: str) -> Optional[str]:
+    for k in normalize_fact_key(query):
+        if k in facts:
+            return facts[k]
+    return None
 
 
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Inject known user facts in natural language so the model can reason with them."""
+    """Prepend known facts to system context."""
     try:
         facts = list_facts()
         if facts:
-            friendly_summary = _summarize_facts_for_brain(facts)
             print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
             context.insert(
                 0,
                 {
                     "role": "system",
-                    "content": (
-                        "You already know the following about the user. "
-                        "Use this knowledge naturally in conversation: "
-                        f"{friendly_summary}"
-                    ),
+                    "content": f"Known user facts (authoritative): {json.dumps(facts)}",
                 },
             )
     except Exception as e:
@@ -86,15 +88,12 @@ def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def substitute_facts_in_text(text: str) -> str:
-    """Replace placeholders (my city, where I live, etc.) with stored facts for plugins."""
+    """Replace placeholders (my city, favorite color, etc.) using fuzzy matching."""
     try:
         facts = list_facts()
         for key, val in facts.items():
-            lowkey = key.lower()
-            if any(x in lowkey for x in ("live", "city", "location")):
-                text = re.sub(r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b", val, text, flags=re.I)
-            elif "color" in lowkey:
-                text = re.sub(r"\b(my\s+favorite\s+color|favorite\s+color)\b", val, text, flags=re.I)
+            for alias in normalize_fact_key(key):
+                text = re.sub(rf"\b{re.escape(alias)}\b", val, text, flags=re.I)
         return text
     except Exception as e:
         print("[SubstituteFactsError]", e)
@@ -102,7 +101,7 @@ def substitute_facts_in_text(text: str) -> str:
 
 
 def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
-    """Assemble working context with recent turns, facts, summaries, and long-term recall."""
+    """Combine conversation history, facts, and vector summaries."""
     context: list[dict[str, str]] = []
     try:
         init_db_if_needed()
@@ -111,27 +110,19 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # Add facts first
     context = inject_facts(context)
 
-    # Add summaries + deep recall
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            context.insert(
-                0,
-                {"role": "system", "content": "Relevant historical summaries:\n" + "\n".join(summaries)},
-            )
+            context.insert(0, {"role": "system", "content": "\n".join(summaries)})
     except Exception as e:
         print("[VectorMemorySummaryError]", e)
 
     try:
         deep_refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if deep_refs:
-            context.insert(
-                0,
-                {"role": "system", "content": "Detailed references:\n" + "\n".join(deep_refs)},
-            )
+            context.insert(0, {"role": "system", "content": "\n".join(deep_refs)})
     except Exception as e:
         print("[VectorMemoryDetailError]", e)
 
@@ -141,6 +132,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Cortex API is running."}
@@ -157,52 +149,48 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
-    # Substitute known facts early for plugin-friendly phrasing
     text = substitute_facts_in_text(text)
 
-    # Lightweight intent classification
-    lang_intent = classify_language_intent(text)
-    print(f"[LangIntent] {lang_intent} :: {text}")
-
-    # Core router for plugins
+    # Route to plugins or brain
     try:
         router_output = route(text)
     except Exception as e:
         return {"reply": f"Router error: {e}"}
+
     actions = router_output.get("actions", [])
 
-    # 🧠 Brain + memory mode
     if not actions:
         try:
-            # Clean and detect corrections
             update_or_delete_from_text(text)
-
-            if lang_intent == "declaration":
-                cleaned = re.sub(r"^(well|actually|no|yeah|ok|okay|so)[,.\s]+", "", text.strip(), flags=re.I)
-                fact_match = re.search(
-                    r"^\s*my\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
-                    cleaned,
-                    re.I,
-                )
-                if fact_match:
-                    key, val = fact_match.groups()
-                    key = key.strip().lower().replace("favourite", "favorite")
-                    val = val.strip()
-                    if not re.match(r"^(who|what|where|when|why|how)\b", val, re.I):
-                        val = re.sub(r"[.?!\s]+$", "", val)
-                        print(f"[FactCapture] key='{key}' val='{val}'")
-                        save_fact(key, val)
+            # Capture new factual statements
+            fact_match = re.search(
+                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
+                text, re.I
+            )
+            if fact_match:
+                key, val = fact_match.groups()
+                key = key.strip().lower().replace("favourite", "favorite")
+                val = val.strip().rstrip(".!?")
+                print(f"[FactCapture] {key} = {val}")
+                save_fact(key, val)
         except Exception as e:
             print("[FactCaptureError]", e)
 
-        # Build context AFTER saving facts
-        try:
-            context = build_context_with_retrieval(text)
-            reply = brain_chat(text, context=context)
-        except Exception as e:
-            reply = f"(brain offline) {e}"
+        # Build enriched context
+        context = build_context_with_retrieval(text)
 
-        # Record exchanges and store vectors
+        # Check if question directly references known facts
+        facts = list_facts()
+        for key in list(facts.keys()):
+            if any(alias in text.lower() for alias in normalize_fact_key(key)):
+                reply = f"You told me your {key} is {facts[key]}."
+                break
+        else:
+            try:
+                reply = brain_chat(text, context=context)
+            except Exception as e:
+                reply = f"(brain offline) {e}"
+
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
@@ -229,40 +217,19 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             result = feedback.handle(args)
         else:
             result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
+
         summary = result.get("summary") or ""
         if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
-            try:
-                context = build_context_with_retrieval(text)
-                reply = brain_chat(
-                    f"{text}\n\nPlugin output:\n{summary}\n\nRespond conversationally or fill in any missing information.",
-                    context=context,
-                )
-                return {"reply": reply}
-            except Exception as e:
-                print("[ReflectionError]", e)
+            context = build_context_with_retrieval(text)
+            reply = brain_chat(
+                f"{text}\n\nPlugin output:\n{summary}\n\n"
+                "Respond conversationally or fill in any missing information.",
+                context=context,
+            )
+            return {"reply": reply}
         return {"reply": summary}
     except Exception as e:
         return {"reply": f"Plugin error ({plugin}): {e}"}
-
-
-@app.post("/execute")
-def execute(body: Dict[str, Any]) -> Dict[str, Any]:
-    plugin = body.get("plugin")
-    args = body.get("args", {})
-    if not plugin:
-        return {"status": "error", "message": "Missing plugin name."}
-    try:
-        if plugin == "web_search":
-            return web_search.handle(args)
-        if plugin == "weather_plugin":
-            return weather_plugin.handle(args)
-        if plugin == "google_places":
-            return google_places.handle(args)
-        if plugin == "feedback":
-            return feedback.handle(args)
-    except Exception as e:
-        return {"status": "error", "message": f"{plugin} failed: {e}"}
-    return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
 
 @app.get("/health", include_in_schema=False)
@@ -271,5 +238,5 @@ def health():
 
 
 @app.on_event("startup")
-def startup_message() -> None:
+def startup_message():
     print("✅ Cortex API started — ready for chat and plugin actions.")
