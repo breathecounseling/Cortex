@@ -5,12 +5,13 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-print(f"[MemoryDB] Using database at {DB_PATH}")
  ---------------------------------------------------------------------------
 # Database setup
 # ---------------------------------------------------------------------------
 
 DB_PATH = Path("/data") / "memory.db"
+
+print(f"[MemoryDB] Using database at {DB_PATH}")
 
 
 def init_db():
