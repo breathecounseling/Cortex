@@ -147,3 +147,58 @@ def summarize_if_needed() -> None:
         print("[VectorMemorySummaryError]", e)
     finally:
         conn.close()
+
+# ---------------------------------------------------------------------
+# Retrieval helpers restored
+# ---------------------------------------------------------------------
+
+def retrieve_topic_summaries(query: str, k: int = 3) -> list[str]:
+    """
+    Return top-k short summaries across all vectors.
+    Used by main.py for memory context injection.
+    """
+    init_vector_db()
+    conn = _connect()
+    try:
+        qv = np.frombuffer(embed(query), dtype=np.float32)
+        c = conn.cursor()
+        rows = c.execute(
+            "SELECT content, vector FROM vectors WHERE kind='summary' AND archived=0"
+        ).fetchall()
+        scored = []
+        for content, blob in rows:
+            v = np.frombuffer(blob, dtype=np.float32)
+            scored.append((_cosine_sim(qv, v), content))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [t for _, t in scored[:max(1, k)]]
+    except Exception as e:
+        print("[RetrieveTopicSummariesError]", e)
+        return []
+    finally:
+        conn.close()
+
+
+def hierarchical_recall(query: str, k_vols: int = 2, k_refs: int = 3) -> list[str]:
+    """
+    Two-level recall stub for compatibility; returns top detailed memories.
+    """
+    init_vector_db()
+    conn = _connect()
+    try:
+        qv = np.frombuffer(embed(query), dtype=np.float32)
+        c = conn.cursor()
+        rows = c.execute(
+            "SELECT content, vector FROM vectors WHERE kind='detail' AND archived=0"
+        ).fetchall()
+        scored = []
+        for content, blob in rows:
+            v = np.frombuffer(blob, dtype=np.float32)
+            scored.append((_cosine_sim(qv, v), content))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = [t for _, t in scored[:max(1, k_refs)]]
+        return top
+    except Exception as e:
+        print("[HierarchicalRecallError]", e)
+        return []
+    finally:
+        conn.close()
