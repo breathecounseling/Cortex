@@ -16,7 +16,7 @@ from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 
-# 🧠 Brain + Memory
+# 🧠 Brain + flat memory
 from executor.ai.router import chat as brain_chat
 from executor.utils.memory import (
     init_db_if_needed,
@@ -26,13 +26,16 @@ from executor.utils.memory import (
     list_facts,
     update_or_delete_from_text,
 )
+
+# Vector memory (safe to keep on; summarization optional)
 from executor.utils.vector_memory import (
     store_vector,
     summarize_if_needed,
     retrieve_topic_summaries,
     hierarchical_recall,
 )
-# 🌐 Graph Memory (Phase 2.9 foundation)
+
+# 🌐 Graph Memory (locations + general facts)
 from executor.utils import memory_graph as gmem
 
 app = FastAPI()
@@ -119,15 +122,24 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     semantic = detect_fact_or_question(text)
     print(f"[LangIntent] {lang_type} :: {text}")
 
-    # 2️⃣ Handle forget / correction commands early
+    # 2️⃣ Handle delete/correction commands
+    #    First let the flat memory handle generic phrases (back-compat),
+    #    then give graph memory a chance to target domain-specific forgets.
     try:
         action = update_or_delete_from_text(text)
         if action.get("action") == "deleted":
             return {"reply": f"Got it — I've forgotten {action.get('key', 'that')}."}
     except Exception as e:
-        print("[ForgetError]", e)
+        print("[ForgetError.Flat]", e)
 
-    # 3️⃣ Graph memory: locations
+    try:
+        g_forget = gmem.forget_fact_or_location(text)
+        if g_forget:
+            return {"reply": g_forget}
+    except Exception as e:
+        print("[ForgetError.Graph]", e)
+
+    # 3️⃣ Graph memory: locations (overwrite-safe) & questions
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
@@ -138,17 +150,39 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[GraphLocationError]", e)
 
-    # 4️⃣ Fact declarations / questions
+    # 4️⃣ General facts via graph (overwrite-safe),
+    #    and semantic fact handling
+    try:
+        # Direct graph-friendly fact declarations (no regex)
+        g_fact_confirm = gmem.extract_and_save_fact(text)
+        if g_fact_confirm:
+            return {"reply": g_fact_confirm}
+    except Exception as e:
+        print("[GraphFactError]", e)
+
     if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
+        # store in both flat and graph (domain-agnostic "general" scope)
         save_fact(semantic["key"], semantic["value"])
-        gmem.upsert_fact("general", semantic["key"], semantic["value"])
+        try:
+            gmem.upsert_node("general", semantic["key"], semantic["value"], scope="global")
+        except Exception as e:
+            print("[GraphUpsertError]", e)
         print(f"[Memory] Saved: {semantic['key']} = {semantic['value']}")
         return {"reply": f"Got it — your {semantic['key']} is {semantic['value']}."}
 
     if semantic["type"] == "fact.query" and semantic.get("key"):
-        val = gmem.get_fact("general", semantic["key"]) or list_facts().get(semantic["key"])
+        # Prefer graph value if present, else fall back to flat KV
+        val = None
+        try:
+            node = gmem.get_node("general", semantic["key"], scope="global")
+            val = node["value"] if node else None
+        except Exception as e:
+            print("[GraphGetError]", e)
+        if not val:
+            val = list_facts().get(semantic["key"])
         if val:
             return {"reply": f"Your {semantic['key']} is {val}."}
+        # store pending key in flat memory for short answer linking (if you still use it)
         save_fact("last_fact_query", semantic["key"])
         print(f"[Memory] Saved: last_fact_query = {semantic['key']}")
         return {"reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."}
