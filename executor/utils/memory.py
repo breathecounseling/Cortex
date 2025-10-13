@@ -93,43 +93,29 @@ def update_or_delete_from_text(text: str):
     """
     Detect user requests to delete or correct facts.
     Supports both general ("forget that") and targeted ("forget my location") forms.
-    Also purges matching entries from conversation context.
+    Leaves conversation context intact for historical continuity.
     """
     lowered = text.lower().strip()
 
-    def _purge_context(keyword: str):
-        """Remove any context lines mentioning a given keyword."""
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            pattern = f"%{keyword}%"
-            c.execute("DELETE FROM memory WHERE key LIKE 'context:%' AND value LIKE ?", (pattern,))
-            conn.commit()
-            conn.close()
-            print(f"[ContextPurge] Removed context mentioning '{keyword}'")
-        except Exception as e:
-            print(f"[ContextPurgeError] {e}")
-
     # Targeted forget/delete: "forget my location", "delete my favorite color"
-    match = re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered)
-    if match:
-        key = match.group(3).strip().lower()
-        print(f"[MemoryDelete] Targeted delete request for: {key}")
-        try:
-            delete_fact(key)
-            _purge_context(key)
-            return {"action": "deleted", "key": key}
-        except Exception as e:
-            print(f"[MemoryDeleteError] {e}")
-            return {"action": "error", "key": key}
+    if re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered):
+        match = re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered)
+        if match:
+            key = match.group(3).strip().lower()
+            print(f"[MemoryDelete] Targeted delete request for: {key}")
+            try:
+                delete_fact(key)
+                return {"action": "deleted", "key": key}
+            except Exception as e:
+                print(f"[MemoryDeleteError] {e}")
+                return {"action": "error", "key": key}
 
-    # Generic forget: "forget that", "remove it", etc.
+    # Generic forget
     if any(p in lowered for p in ("forget that", "remove it", "delete that", "clear it")):
         facts = list_facts()
         if facts:
             last_key = list(facts.keys())[-1]
             delete_fact(last_key)
-            _purge_context(last_key)
             return {"action": "deleted", "key": last_key}
         return {"action": "none"}
 
@@ -137,11 +123,9 @@ def update_or_delete_from_text(text: str):
     if "changed my mind" in lowered or "that's wrong" in lowered or "no, it's" in lowered:
         if "color" in lowered:
             delete_fact("favorite color")
-            _purge_context("color")
             return {"action": "deleted", "key": "favorite color"}
         if "location" in lowered:
             delete_fact("location")
-            _purge_context("location")
             return {"action": "deleted", "key": "location"}
         return {"action": "deleted", "key": None}
 
