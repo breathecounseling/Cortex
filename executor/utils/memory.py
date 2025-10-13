@@ -5,13 +5,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-#
----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Database setup
 # ---------------------------------------------------------------------------
 
 DB_PATH = Path("/data") / "memory.db"
-
 print(f"[MemoryDB] Using database at {DB_PATH}")
 
 
@@ -113,11 +111,9 @@ def update_or_delete_from_text(text: str):
 
     # "I changed my mind about my favorite color"
     if "changed my mind" in lowered or "no, that's wrong" in lowered:
-        # extract a key hint if possible
         if "color" in lowered:
             delete_fact("favorite color")
             return {"action": "deleted", "key": "favorite color"}
-        # add more patterns here as needed
         return {"action": "deleted", "key": None}
 
     return {"action": "none"}
