@@ -52,14 +52,23 @@ class ChatBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Prepend known user facts to context so the brain always sees them."""
+    """
+    Prepend known user facts to context so the brain always sees them.
+    Adds a system note when no current facts exist.
+    """
     try:
         facts = list_facts()
         if facts:
             print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
             context.insert(
                 0,
-                {"role": "system", "content": f"Known user facts: {json.dumps(facts)}"},
+                {"role": "system", "content": f"Known user facts (authoritative): {json.dumps(facts)}"},
+            )
+        else:
+            # If no stored facts, warn the LLM that old chat turns may be outdated
+            context.insert(
+                0,
+                {"role": "system", "content": "Note: Prior chat messages may reference outdated or forgotten facts. Use only current conversation data."},
             )
     except Exception as e:
         print("[InjectFactsError]", e)
@@ -103,7 +112,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # Always inject known facts first
+    # Always inject facts or note outdated data
     context = inject_facts(context)
 
     # Summaries
@@ -112,10 +121,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         if summaries:
             context.insert(
                 0,
-                {
-                    "role": "system",
-                    "content": "Relevant history summaries:\n" + "\n".join(summaries),
-                },
+                {"role": "system", "content": "Relevant history summaries:\n" + "\n".join(summaries)},
             )
     except Exception as e:
         print("[VectorMemorySummaryError]", e)
@@ -126,10 +132,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         if deep_refs:
             context.insert(
                 0,
-                {
-                    "role": "system",
-                    "content": "Detailed references:\n" + "\n".join(deep_refs),
-                },
+                {"role": "system", "content": "Detailed references:\n" + "\n".join(deep_refs)},
             )
     except Exception as e:
         print("[VectorMemoryDetailError]", e)
@@ -140,6 +143,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Cortex API is running."}
@@ -156,9 +160,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
+    # Substitute known facts into the query for plugin use
     text = substitute_facts_in_text(text)
 
-    # ROUTER PHASE
+    # ROUTER phase
     try:
         router_output = route(text)
     except Exception as e:
@@ -168,19 +173,18 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     # 🧠 No plugin actions → brain + memory
     if not actions:
-        # 🔧 Handle memory corrections or deletions first
         try:
+            # detect corrections ("forget that", "changed my mind")
             mem_action = update_or_delete_from_text(text)
             if mem_action.get("action") == "deleted":
                 key = mem_action.get("key") or "that information"
                 return {"reply": f"Got it — I've forgotten {key}."}
-        except Exception as e:
-            print("[MemoryDeleteHandlerError]", e)
 
-        # Capture new facts like "My X is Y"
-        try:
+            # Capture new facts like "My X is Y"
             fact_match = re.search(
-                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+(.+)", text, re.I
+                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
+                text,
+                re.I,
             )
             if fact_match:
                 key, val = fact_match.groups()
