@@ -12,16 +12,29 @@ DB_PATH = Path("/data") / "memory.db"
 print(f"[MemoryDB] Using database at {DB_PATH}")
 
 def init_db():
-    """Initialize the SQLite memory database if it does not exist."""
+    """Initialize the SQLite database for both facts and chat context."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS memory (
+
+    # Core fact table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS memory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             key TEXT,
             value TEXT
-        )"""
-    )
+        )
+    """)
+
+    # Chat context table (new)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS context (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session TEXT,
+            role TEXT,
+            message TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -49,7 +62,6 @@ def save_fact(key: str, value: str):
         conn.close()
         print(f"[Memory] ✅ Saved fact: {key} = {value}")
 
-        # immediate verification
         verify = load_fact(key)
         if verify != value:
             print(f"[MemoryWarning] Fact '{key}' failed persistence check (got {verify})")
@@ -73,6 +85,7 @@ def delete_fact(key: str):
         print(f"[MemoryError] delete_fact failed: {e}")
 
 def load_fact(key: str) -> Optional[str]:
+    """Retrieve one fact."""
     key = key.strip().lower()
     init_db()
     try:
@@ -95,7 +108,7 @@ def list_facts() -> Dict[str, str]:
         c.execute("SELECT key, value FROM memory")
         rows = c.fetchall()
         conn.close()
-        facts = {k: v for k, v in rows}
+        facts = {k: v for k, v in rows if not k.startswith("context:")}
         print(f"[MemoryDump] Current facts:\n{json.dumps(facts, indent=2)}")
         return facts
     except Exception as e:
@@ -110,11 +123,10 @@ def update_or_delete_from_text(text: str):
     """
     Detect user requests to delete or correct facts.
     Supports both general ("forget that") and targeted ("forget my location") forms.
-    Leaves conversation context intact for historical continuity.
     """
     lowered = text.lower().strip()
 
-    # Targeted forget/delete: "forget my location", "delete my favorite color"
+    # Targeted forget/delete
     if re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered):
         match = re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered)
         if match:
@@ -136,7 +148,7 @@ def update_or_delete_from_text(text: str):
             return {"action": "deleted", "key": last_key}
         return {"action": "none"}
 
-    # "I changed my mind" or "that's wrong"
+    # "I changed my mind" / corrections
     if "changed my mind" in lowered or "that's wrong" in lowered or "no, it's" in lowered:
         if "color" in lowered:
             delete_fact("favorite color")
@@ -149,11 +161,10 @@ def update_or_delete_from_text(text: str):
     return {"action": "none"}
 
 # ---------------------------------------------------------------------------
-# Backward-compatibility helpers (self-healer, repair logs)
+# Backward compatibility (self-healer / repair logs)
 # ---------------------------------------------------------------------------
 
 def remember(*args, **kwargs):
-    """Flexible legacy writer."""
     init_db_if_needed()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -164,7 +175,6 @@ def remember(*args, **kwargs):
     conn.close()
 
 def record_repair(*args, **kwargs):
-    """Legacy support for self-healer logs."""
     init_db_if_needed()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -175,41 +185,38 @@ def record_repair(*args, **kwargs):
     conn.close()
 
 # ---------------------------------------------------------------------------
-# Conversational context
+# Conversational context (now in its own table)
 # ---------------------------------------------------------------------------
 
 def remember_exchange(role: str, message: str, session: str = "default") -> None:
+    """Record conversational turns in the context table."""
     try:
         init_db_if_needed()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        key = f"context:{session}:{role}"
-        value = message
-        c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
+        c.execute(
+            "INSERT INTO context (session, role, message) VALUES (?, ?, ?)",
+            (session, role, message),
+        )
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"[MemoryError] failed to record exchange: {e}")
+        print(f"[ContextError] failed to record exchange: {e}")
 
 def recall_context(session: str = "default", limit: int = 6) -> List[Dict[str, str]]:
+    """Retrieve the last N conversational exchanges."""
     init_db_if_needed()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
-        "SELECT id, key, value FROM memory WHERE key LIKE ? ORDER BY id DESC LIMIT ?",
-        (f"context:{session}:%", int(limit)),
+        "SELECT role, message FROM context WHERE session=? ORDER BY id DESC LIMIT ?",
+        (session, int(limit)),
     )
     rows = c.fetchall()
     conn.close()
-
     if not rows:
         return []
-
     messages: List[Dict[str, str]] = []
-    for _id, key, value in reversed(rows):
-        try:
-            role = key.split(":", 2)[2]
-        except Exception:
-            role = "user"
-        messages.append({"role": role, "content": value})
+    for role, msg in reversed(rows):
+        messages.append({"role": role, "content": msg})
     return messages
