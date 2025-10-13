@@ -3,6 +3,7 @@ from __future__ import annotations
 import os, re, json
 from pathlib import Path
 from typing import Any, Dict
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,7 +33,6 @@ from executor.utils.vector_memory import (
     hierarchical_recall,
 )
 
-# 🗣️ Linguistic intent
 from executor.core.language_intent import classify_language_intent
 
 app = FastAPI()
@@ -50,13 +50,13 @@ class ChatBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Helpers
 # ---------------------------------------------------------------------------
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
     try:
         facts = list_facts()
+        print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
         if facts:
-            print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
             context.insert(0, {"role": "system", "content": f"Known user facts: {json.dumps(facts)}"})
     except Exception as e:
         print("[InjectFactsError]", e)
@@ -130,16 +130,16 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         return {"reply": f"Router error: {e}"}
     actions = router_output.get("actions", [])
 
-    # -------------------------
-    # 🧠 Brain + memory path
-    # -------------------------
+    # 🧠 Brain + memory mode
     if not actions:
         try:
             update_or_delete_from_text(text)
+            print(f"[FactDebug] Raw text: {text}")
 
-            # Save facts BEFORE building context
             if lang_intent == "declaration":
                 cleaned = re.sub(r"^(well|actually|no|yeah|ok|okay|so)[,.\s]+", "", text.strip(), flags=re.I)
+                print(f"[FactDebug] Cleaned text: {cleaned}")
+
                 fact_match = re.search(
                     r"^\s*my\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
                     cleaned,
@@ -149,14 +149,20 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                     key, val = fact_match.groups()
                     key = key.strip().lower().replace("favourite", "favorite")
                     val = val.strip()
+                    print(f"[FactDebug] Matched key='{key}' val='{val}'")
+
                     if not re.match(r"^(who|what|where|when|why|how)\b", val, re.I):
                         val = re.sub(r"[.?!\s]+$", "", val)
-                        print(f"[FactCapture] key='{key}' val='{val}'")
+                        print(f"[FactDebug] Writing to DB: {key} = {val}")
                         save_fact(key, val)
+                        print(f"[FactDebug] Fact write completed.")
+                    else:
+                        print(f"[FactSkip] value looked like a question: '{val}'")
+                else:
+                    print("[FactDebug] No regex match found.")
         except Exception as e:
             print("[FactCaptureError]", e)
 
-        # Build context AFTER saving fact
         try:
             context = build_context_with_retrieval(text)
             reply = brain_chat(text, context=context)
@@ -174,9 +180,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
         return {"reply": reply}
 
-    # -------------------------
     # Plugin dispatch
-    # -------------------------
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
