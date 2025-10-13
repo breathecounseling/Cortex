@@ -267,15 +267,6 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"{plugin} failed: {e}"}
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
-# --- temporary route for dev only ---
-@app.get("/reset-fact", include_in_schema=False)
-def reset_fact():
-    from executor.utils.memory import delete_fact, list_facts
-    try:
-        delete_fact("favorite color")
-        return {"status": "ok", "remaining": list_facts()}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 @app.get("/health", include_in_schema=False)
 def health():
