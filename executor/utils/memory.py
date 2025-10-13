@@ -1,19 +1,15 @@
+# executor/utils/memory.py
 from __future__ import annotations
-import json
-import sqlite3
+import json, re, sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional, List
-import re
-
-# ---------------------------------------------------------------------------
-# Database setup
-# ---------------------------------------------------------------------------
 
 DB_PATH = Path("/data") / "memory.db"
 print(f"[MemoryDB] Using database at {DB_PATH}")
 
+EPHEMERAL_KEYS = {"last_fact_query"}
+
 def init_db():
-    """Initialize the SQLite memory database if it does not exist."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -32,12 +28,8 @@ def init_db_if_needed():
     except Exception as e:
         print("[InitDBError]", e)
 
-# ---------------------------------------------------------------------------
-# Core fact storage helpers
-# ---------------------------------------------------------------------------
-
+# Facts
 def save_fact(key: str, value: str):
-    """Save or update a simple key/value fact to memory."""
     if not key:
         return
     key = key.strip().lower()
@@ -45,19 +37,18 @@ def save_fact(key: str, value: str):
     init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DELETE FROM memory WHERE key = ?", (key,))
-    c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
+    c.execute("DELETE FROM memory WHERE key=?", (key,))
+    c.execute("INSERT INTO memory (key,value) VALUES (?,?)", (key, value))
     conn.commit()
     conn.close()
     print(f"[Memory] Saved: {key} = {value}")
 
 def delete_fact(key: str):
-    """Delete a fact completely."""
     key = key.strip().lower()
     init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("DELETE FROM memory WHERE key = ?", (key,))
+    c.execute("DELETE FROM memory WHERE key=?", (key,))
     conn.commit()
     conn.close()
     print(f"[Memory] Deleted: {key}")
@@ -67,33 +58,28 @@ def load_fact(key: str) -> Optional[str]:
     init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT value FROM memory WHERE key = ?", (key,))
+    c.execute("SELECT value FROM memory WHERE key=?", (key,))
     row = c.fetchone()
     conn.close()
     return row[0] if row else None
 
 def list_facts() -> Dict[str, str]:
-    """Return all key/value facts stored in memory except ephemeral ones."""
     init_db()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT key, value FROM memory")
     rows = c.fetchall()
     conn.close()
-    return {k: v for k, v in rows if k not in {"last_fact_query"}}
+    return {k: v for k, v in rows if not k.startswith("context:")}
 
-# ---------------------------------------------------------------------------
-# Conversational helpers for corrections
-# ---------------------------------------------------------------------------
-
+# Delete/correction helpers
 def update_or_delete_from_text(text: str) -> Dict[str, Any]:
     """
-    Detect user requests to delete or correct facts.
-    Supports general ('forget that') and targeted ('forget my location') forms.
+    Detect "forget/delete/remove/clear my/the X" and generic forget-phrases.
+    If a turn includes both forget and a new declaration, main.py will re-save afterwards.
     """
     lowered = (text or "").lower().strip()
 
-    # Targeted forget/delete: "forget my location", "delete my favorite color"
     m = re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered)
     if m:
         key = m.group(3).strip().lower()
@@ -105,87 +91,47 @@ def update_or_delete_from_text(text: str) -> Dict[str, Any]:
             print(f"[MemoryDeleteError] {e}")
             return {"action": "error", "key": key}
 
-    # Generic forget phrases
     if any(p in lowered for p in ("forget that", "remove it", "delete that", "clear it")):
         facts = list_facts()
+        facts = {k:v for k,v in facts.items() if k not in EPHEMERAL_KEYS}
         if facts:
             last_key = list(facts.keys())[-1]
             delete_fact(last_key)
             return {"action": "deleted", "key": last_key}
         return {"action": "none"}
 
-    # "I changed my mind" or "that's wrong"
-    if "changed my mind" in lowered or "that's wrong" in lowered or "no, it's" in lowered:
-        if "color" in lowered:
-            delete_fact("favorite color")
-            return {"action": "deleted", "key": "favorite color"}
-        if "location" in lowered:
-            delete_fact("location")
-            return {"action": "deleted", "key": "location"}
-        return {"action": "deleted", "key": None}
+    # Optional: explicit corrections shortcuts (kept minimal; semantic handler usually covers this)
+    if "changed my mind" in lowered or "that's wrong" in lowered:
+        # We don't guess the key here; main.py's semantic layer should set it.
+        return {"action": "none"}
 
     return {"action": "none"}
 
-# ---------------------------------------------------------------------------
-# Backward-compatibility helpers (self-healer, repair logs)
-# ---------------------------------------------------------------------------
-
-def remember(*args, **kwargs):
-    """Flexible legacy writer."""
-    init_db_if_needed()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    key = ":".join(str(a) for a in args if a is not None) or kwargs.get("key", "unknown")
-    value = json.dumps(kwargs) if kwargs else ""
-    c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-
-def record_repair(*args, **kwargs):
-    """Legacy support for self-healer logs."""
-    init_db_if_needed()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    key = "repair"
-    value = json.dumps(kwargs if kwargs else {"args": args})
-    c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-
-# ---------------------------------------------------------------------------
-# Conversational context
-# ---------------------------------------------------------------------------
-
+# Context
 def remember_exchange(role: str, message: str, session: str = "default") -> None:
     try:
         init_db_if_needed()
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        key = f"context:{session}:{role}"
-        value = message
-        c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
+        c.execute("INSERT INTO memory (key, value) VALUES (?,?)", (f"context:{session}:{role}", message))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"[MemoryError] failed to record exchange: {e}")
 
-def recall_context(session: str = "default", limit: int = 6) -> List[Dict[str, str]]:
+def recall_context(session: str = "default", limit: int = 8) -> List[Dict[str, str]]:
     init_db_if_needed()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(
-        "SELECT id, key, value FROM memory WHERE key LIKE ? ORDER BY id DESC LIMIT ?",
-        (f"context:{session}:%", int(limit)),
-    )
+    c.execute("SELECT id, key, value FROM memory WHERE key LIKE ? ORDER BY id DESC LIMIT ?",
+              (f"context:{session}:%", int(limit)))
     rows = c.fetchall()
     conn.close()
-
     messages: List[Dict[str, str]] = []
     for _id, key, value in reversed(rows):
-        role = "user"
         try:
             role = key.split(":", 2)[2]
         except Exception:
-            pass
+            role = "user"
         messages.append({"role": role, "content": value})
     return messages
