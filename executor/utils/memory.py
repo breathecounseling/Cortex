@@ -95,13 +95,26 @@ def list_facts() -> Dict[str, str]:
 
 def update_or_delete_from_text(text: str):
     """
-    Lightweight NLP rules to detect corrections in plain language.
-    Called automatically each turn before save_fact().
+    Detect user requests to delete or correct facts.
+    Supports both general ("forget that") and targeted ("forget my location") forms.
     """
     lowered = text.lower().strip()
-    # Forget / remove
-    if any(p in lowered for p in ("forget that", "remove it", "delete that")):
-        # crude: forget last fact
+
+    # Targeted forget/delete: "forget my location", "delete my favorite color"
+    if re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered):
+        match = re.search(r"\b(forget|delete|remove|clear)\s+(my|the)\s+([\w\s]+)", lowered)
+        if match:
+            key = match.group(3).strip().lower()
+            print(f"[MemoryDelete] Targeted delete request for: {key}")
+            try:
+                delete_fact(key)
+                return {"action": "deleted", "key": key}
+            except Exception as e:
+                print(f"[MemoryDeleteError] {e}")
+                return {"action": "error", "key": key}
+    
+    # Generic forget
+    if any(p in lowered for p in ("forget that", "remove it", "delete that", "clear it")):
         facts = list_facts()
         if facts:
             last_key = list(facts.keys())[-1]
@@ -109,11 +122,14 @@ def update_or_delete_from_text(text: str):
             return {"action": "deleted", "key": last_key}
         return {"action": "none"}
 
-    # "I changed my mind about my favorite color"
-    if "changed my mind" in lowered or "no, that's wrong" in lowered:
+    # "I changed my mind" or "that's wrong"
+    if "changed my mind" in lowered or "that's wrong" in lowered or "no, it's" in lowered:
         if "color" in lowered:
             delete_fact("favorite color")
             return {"action": "deleted", "key": "favorite color"}
+        if "location" in lowered:
+            delete_fact("location")
+            return {"action": "deleted", "key": "location"}
         return {"action": "deleted", "key": None}
 
     return {"action": "none"}
