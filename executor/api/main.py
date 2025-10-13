@@ -267,28 +267,19 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"{plugin} failed: {e}"}
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
-@app.get("/purge-memory", include_in_schema=False)
-def purge_memory():
-    """
-    Completely delete and recreate the /data/memory.db SQLite file.
-    Only for development use!
-    """
-    import os
-    from executor.utils.memory import DB_PATH, init_db
-
-    try:
-        if DB_PATH.exists():
-            os.remove(DB_PATH)
-        init_db()
-        return {"status": "ok", "message": f"Recreated clean DB at {DB_PATH}"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
 
+@app.get("/debug-db", include_in_schema=False)
+def debug_db():
+    from executor.utils.memory import DB_PATH, list_facts, save_fact
+    try:
+        save_fact("debug_key", "debug_value")
+        facts = list_facts()
+        return {"db_path": str(DB_PATH), "exists": DB_PATH.exists(), "facts": facts}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.on_event("startup")
 def startup_message() -> None:
