@@ -95,6 +95,94 @@ def delete_node(domain: str, key: str, scope: str = "global") -> bool:
         print(f"[Graph] Deleted node: ({domain}.{key}.{scope})")
     return changed
 
+# PATCH START — 2.8.1 unified forget / implicit change / scope helpers
+import re
+from typing import Optional, Dict, List
+from executor.utils.sanitizer import sanitize_value
+
+_DOMAIN_SCOPES = {
+    "location": ["home", "current", "trip", "global"],
+    "color": ["global"],
+    "food": ["global"],
+}
+
+def get_all_scopes_for_domain(domain: str) -> List[str]:
+    """Return known scopes for a domain."""
+    return _DOMAIN_SCOPES.get(domain, ["global"])
+
+def infer_location_key_and_scope(text: str) -> (Optional[str], Optional[str]):
+    """Infer which location key/scope user refers to."""
+    t = text.lower()
+    if "home" in t or "live" in t:
+        return ("home", "home")
+    if "current" in t or re.search(r"\bi['’]?m in\b|\bcurrently in\b", t):
+        return ("current", "current")
+    if "trip" in t or "going to" in t or "destination" in t:
+        return ("trip", "trip")
+    return (None, None)
+
+def detect_implicit_change(text: str) -> Optional[Dict[str, str]]:
+    """Detect phrasing that implies overwriting an existing fact."""
+    t = text.lower()
+    if re.search(r"\bmoved to\b|\brelocated to\b|\bnew home\b", t):
+        return {"domain": "location", "key": "home", "scope": "home"}
+    if re.search(r"\bi['’]?m in\b|\bi am in\b|\bcurrently in\b", t):
+        return {"domain": "location", "key": "current", "scope": "current"}
+    if re.search(r"\bgoing to\b|\bheading to\b|\btrip to\b", t):
+        return {"domain": "location", "key": "trip", "scope": "trip"}
+    return None
+
+def forget_fact_or_location(text: str) -> Optional[str]:
+    """Scope-aware forget / correction across all domains."""
+    t = (text or "").lower().strip()
+    m = _CHANGE_RX.search(t)
+    if m:
+        key = m.group("key").strip().lower()
+        dom = detect_domain_from_key(key)
+        for scope in get_all_scopes_for_domain(dom):
+            delete_node(dom, key, scope)
+        return f"Got it — I've updated your {key}."
+
+    if "forget" in t:
+        if any(w in t for w in ["trip", "home", "current", "city", "place", "location"]):
+            dom = "location"
+            key, scope = infer_location_key_and_scope(t)
+            if key:
+                delete_node(dom, key, scope)
+                return f"Got it — I've forgotten your {key} location."
+            else:
+                for scope in get_all_scopes_for_domain(dom):
+                    delete_node(dom, "*", scope)
+                return "Got it — I've cleared your saved locations."
+
+        key = re.sub(r"forget\s+(my|the)\s+", "", t).strip()
+        dom = detect_domain_from_key(key)
+        for scope in get_all_scopes_for_domain(dom):
+            delete_node(dom, key, scope)
+        return f"Got it — I've forgotten your {key}."
+
+    return None
+
+def extract_and_save_location(text: str) -> Optional[str]:
+    """Location extractor + implicit change support."""
+    t = (text or "").strip()
+    # implicit change detection
+    change = detect_implicit_change(t)
+    if change:
+        delete_node(change["domain"], change["key"], change["scope"])
+    for rx, (key, scope, msg) in [
+        (_LOC_HOME_RX, ("home", "home", "your home location")),
+        (_LOC_CURR_RX, ("current", "current", "you're currently in")),
+        (_LOC_TRIP_RX, ("trip", "trip", "your trip destination")),
+    ]:
+        m = rx.search(t)
+        if m:
+            city = sanitize_value(m.group("city"))
+            upsert_node("location", key, city, scope=scope)
+            return f"Got it — {msg} is {city}."
+    return None
+# PATCH END
+
 # ---------------------------------------------------------------------
 # AUTO-EXTENSIBLE DOMAIN DETECTION
 # ---------------------------------------------------------------------
