@@ -1,15 +1,12 @@
-# executor/utils/vector_memory.py
 from __future__ import annotations
 import os, sqlite3, json, uuid, time, re
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
-
 import numpy as np
 
-# --- OpenAI client: optional at runtime (Directive #7 safe) ---
 _OPENAI_AVAILABLE = False
 try:
-    from openai import OpenAI  # type: ignore
+    from openai import OpenAI
     _OPENAI_AVAILABLE = True
 except Exception:
     _OPENAI_AVAILABLE = False
@@ -18,21 +15,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 EMBEDDING_MODEL = os.getenv("CORTEX_EMBED_MODEL", "text-embedding-3-small")
 SUMMARY_MODEL = os.getenv("CORTEX_SUMMARY_MODEL", "gpt-4o-mini")
 
-# DB lives on persistent volume
 DB_PATH = Path("/data") / "vector_memory.db"
 os.makedirs(DB_PATH.parent.as_posix(), exist_ok=True)
-
-# Embedding dimension (OpenAI small ~1536 today; we’ll choose 384 for fallback)
-FALLBACK_DIM = int(os.getenv("CORTEX_EMBED_DIM", "384"))
-
-# Compaction thresholds
-COMPACT_THRESHOLD = int(os.getenv("CORTEX_COMPACT_THRESHOLD", "600"))   # compact when volume exceeds this many unarchived detail rows
-COMPACT_BATCH = int(os.getenv("CORTEX_COMPACT_BATCH", "250"))           # how many detail rows to absorb into a summary per compaction
+FALLBACK_DIM = 1536
+COMPACT_THRESHOLD = int(os.getenv("CORTEX_COMPACT_THRESHOLD", "600"))
+COMPACT_BATCH = int(os.getenv("CORTEX_COMPACT_BATCH", "250"))
 DEFAULT_TOPIC = "general"
 
-# ---------------------------------------------------------------------
-# SQLite helpers
-# ---------------------------------------------------------------------
 def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH.as_posix(), check_same_thread=False)
 
@@ -44,368 +33,204 @@ def init_vector_db() -> None:
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         role TEXT,
         content TEXT,
-        vector BLOB
+        vector BLOB,
+        topic TEXT DEFAULT '',
+        kind TEXT DEFAULT 'detail',
+        volume_id TEXT DEFAULT '',
+        range_start INTEGER DEFAULT 0,
+        range_end INTEGER DEFAULT 0,
+        keywords TEXT DEFAULT '',
+        archived INTEGER DEFAULT 0
     )""")
     conn.commit()
     conn.close()
-    migrate_vector_db()
-    _ensure_indices()
 
-def migrate_vector_db() -> None:
-    conn = _connect()
-    c = conn.cursor()
-    # Add columns if missing
-    for stmt in [
-        "ALTER TABLE vectors ADD COLUMN volume_id TEXT DEFAULT ''",
-        "ALTER TABLE vectors ADD COLUMN volume_seq INTEGER DEFAULT 0",
-        "ALTER TABLE vectors ADD COLUMN topic TEXT DEFAULT ''",
-        "ALTER TABLE vectors ADD COLUMN kind TEXT DEFAULT 'detail'",  # 'detail' | 'summary'
-        "ALTER TABLE vectors ADD COLUMN range_start INTEGER DEFAULT 0",
-        "ALTER TABLE vectors ADD COLUMN range_end INTEGER DEFAULT 0",
-        "ALTER TABLE vectors ADD COLUMN keywords TEXT DEFAULT ''",
-        "ALTER TABLE vectors ADD COLUMN archived INTEGER DEFAULT 0"
-    ]:
+def _client_instance():
+    if _OPENAI_AVAILABLE and OPENAI_API_KEY:
         try:
-            c.execute(stmt)
-        except sqlite3.OperationalError:
-            pass
-    conn.commit()
-    conn.close()
+            return OpenAI(api_key=OPENAI_API_KEY)
+        except Exception:
+            return None
+    return None
 
-def _ensure_indices() -> None:
-    conn = _connect()
-    c = conn.cursor()
-    for stmt in [
-        "CREATE INDEX IF NOT EXISTS idx_vectors_kind ON vectors(kind)",
-        "CREATE INDEX IF NOT EXISTS idx_vectors_topic ON vectors(topic)",
-        "CREATE INDEX IF NOT EXISTS idx_vectors_vol ON vectors(volume_id)",
-        "CREATE INDEX IF NOT EXISTS idx_vectors_arch ON vectors(archived)",
-        "CREATE INDEX IF NOT EXISTS idx_vectors_range ON vectors(range_start, range_end)"
-    ]:
-        c.execute(stmt)
-    conn.commit()
-    conn.close()
-
-# ---------------------------------------------------------------------
-# Embeddings & similarity
-# ---------------------------------------------------------------------
-_client = None
-if _OPENAI_AVAILABLE and OPENAI_API_KEY:
-    try:
-        _client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
-        _client = None
+_client = _client_instance()
 
 def _hash_fallback(text: str, dim: int = FALLBACK_DIM) -> np.ndarray:
-    """Deterministic pseudo-embedding when OpenAI is unavailable."""
-    # Simple hashing trick: map bytes into a fixed-dim vector
     rng = np.random.default_rng(abs(hash(text)) % (2**32))
     v = rng.normal(size=dim).astype(np.float32)
-    # Light L2-normalization
     n = np.linalg.norm(v)
     return v / n if n > 0 else v
 
 def embed(text: str) -> bytes:
-    """
-    Return a vector as bytes (float32 array). Uses OpenAI if available,
-    else a deterministic hash-based vector.
-    """
     text = (text or "").strip()
     if not text:
         return _hash_fallback("").tobytes()
-    if _client is not None:
+    if _client:
         try:
             ev = _client.embeddings.create(model=EMBEDDING_MODEL, input=text)
             vec = np.array(ev.data[0].embedding, dtype=np.float32)
-            # normalize for better cosine behavior
-            n = np.linalg.norm(vec)
-            vec = vec / n if n > 0 else vec
+            vec /= np.linalg.norm(vec) or 1.0
             return vec.tobytes()
         except Exception:
             pass
-    # Fallback
     return _hash_fallback(text).tobytes()
 
 def _cosine_sim(v1: np.ndarray, v2: np.ndarray) -> float:
-    n1 = np.linalg.norm(v1); n2 = np.linalg.norm(v2)
-    if n1 == 0 or n2 == 0:
-        return 0.0
-    return float(np.dot(v1, v2) / (n1 * n2))
+    n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    return float(np.dot(v1, v2) / (n1 * n2)) if n1 and n2 else 0.0
 
-# ---------------------------------------------------------------------
-# Topic detection
-# ---------------------------------------------------------------------
-_TOPIC_RULES = [
-    (re.compile(r"\b(revenue|invoice|balance|kpi|pnl|profit|ops|operations|biz|business)\b", re.I), "bizops"),
-    (re.compile(r"\b(workout|gym|steps|calorie|protein|run|yoga|sleep|meal|log my lunch)\b", re.I), "fitness"),
-    (re.compile(r"\b(travel|itinerary|flight|hotel|route|drive|vacation|trip)\b", re.I), "travel"),
-    (re.compile(r"\b(code|bug|test|deploy|docker|fastapi|react|vite|plugin|python|typescript)\b", re.I), "dev"),
-]
-
-def detect_topic(text: str) -> str:
-    t = (text or "").strip()
-    if not t:
-        return DEFAULT_TOPIC
-    for rx, label in _TOPIC_RULES:
-        if rx.search(t):
-            return label
-    return DEFAULT_TOPIC
-
-# ---------------------------------------------------------------------
-# Store & search
-# ---------------------------------------------------------------------
-def store_vector(role: str, text: str, topic: Optional[str] = None,
-                 kind: str = "detail", volume_id: str = "", volume_seq: int = 0,
-                 keywords: str = "") -> None:
-    """Persist a vector row."""
+def store_vector(role: str, text: str, topic: Optional[str] = None) -> None:
     init_vector_db()
-    v = embed(text)
-    topic = topic or detect_topic(text)
     conn = _connect()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO vectors (role, content, vector, topic, kind, volume_id, volume_seq, keywords, archived)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-    """, (role, text, v, topic, kind, volume_id, volume_seq, keywords))
-    conn.commit()
-    conn.close()
+    try:
+        v = embed(text)
+        topic = topic or "general"
+        conn.execute(
+            "INSERT INTO vectors (role, content, vector, topic, kind, archived) VALUES (?, ?, ?, ?, 'detail', 0)",
+            (role, text, v, topic)
+        )
+        conn.commit()
+    except Exception as e:
+        print("[VectorStoreError]", e)
+    finally:
+        conn.close()
 
-def search_similar(query: str, top_k: int = 5, topic: Optional[str] = None,
-                   kind: Optional[str] = None, volume_id: Optional[str] = None) -> List[str]:
-    """
-    Flat cosine search over vectors. Use filters to scope by topic/kind/volume.
-    Returns contents only (strings), sorted by similarity desc.
-    """
-    init_vector_db()
-    qv = np.frombuffer(embed(query), dtype=np.float32)
-
-    conn = _connect()
-    c = conn.cursor()
-    clauses = ["archived=0"]
-    params: List[Any] = []
-    if topic:
-        clauses.append("topic=?"); params.append(topic)
-    if kind:
-        clauses.append("kind=?"); params.append(kind)
-    if volume_id:
-        clauses.append("volume_id=?"); params.append(volume_id)
-    where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
-    c.execute(f"SELECT content, vector FROM vectors{where_sql}")
-    rows = c.fetchall()
-    conn.close()
-
-    scored: List[Tuple[float, str]] = []
-    for content, blob in rows:
-        v = np.frombuffer(blob, dtype=np.float32)
-        scored.append((_cosine_sim(qv, v), content))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [t for _, t in scored[:max(1, top_k)]]
-
-# ---------------------------------------------------------------------
-# Summarization & compaction (volumes)
-# ---------------------------------------------------------------------
-def _client_summary(text: str, goal: str = "Summarize key ideas in concise bullet points.") -> str:
-    """Use OpenAI to summarize. Falls back to rule-based when API is missing."""
-    # Guard: keep things short
-    text = text[:10000]
-    if _client is not None:
+def _client_summary(text: str) -> str:
+    if _client:
         try:
             resp = _client.chat.completions.create(
                 model=SUMMARY_MODEL,
                 messages=[
-                    {"role": "system", "content": goal},
-                    {"role": "user", "content": text}
+                    {"role": "system", "content": "Summarize key ideas in concise bullet points."},
+                    {"role": "user", "content": text[:10000]},
                 ],
                 max_tokens=300,
-                temperature=0.2
+                temperature=0.2,
             )
-            out = (resp.choices[0].message.content or "").strip()
-            return out or "Summary unavailable."
-        except Exception:
-            pass
-    # Fallback: naive compression
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            print("[VectorSummaryError]", e)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    bullets = []
-    for ln in lines[:20]:
-        if len(ln) > 180:
-            bullets.append("• " + ln[:177] + "…")
-        else:
-            bullets.append("• " + ln)
-    return "\n".join(bullets[:15]) or "Summary unavailable."
-
-def _first_default_volume(conn: sqlite3.Connection) -> str:
-    c = conn.cursor()
-    c.execute("SELECT DISTINCT volume_id FROM vectors WHERE volume_id!='' LIMIT 1")
-    row = c.fetchone()
-    if row and row[0]:
-        return row[0]
-    # No volumes yet: create default by assigning empty volume_id rows to a new one
-    vid = str(uuid.uuid4())
-    c.execute("UPDATE vectors SET volume_id=? WHERE volume_id='' AND kind='detail'", (vid,))
-    conn.commit()
-    return vid
-
-def _unarchived_count(conn: sqlite3.Connection, volume_id: str) -> int:
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM vectors WHERE volume_id=? AND kind='detail' AND archived=0", (volume_id,))
-    return int(c.fetchone()[0])
-
-def compact_volume(volume_id: Optional[str] = None) -> bool:
-    """
-    Compact one volume by summarizing the oldest batch of unarchived detail rows.
-    Returns True if compaction happened.
-    """
-    init_vector_db()
-    conn = _connect()
-    try:
-        if not volume_id:
-            volume_id = _first_default_volume(conn)
-
-        if _unarchived_count(conn, volume_id) < COMPACT_THRESHOLD:
-            return False
-
-        c = conn.cursor()
-        # Oldest unarchived detail rows
-        c.execute("""
-        SELECT id, content FROM vectors
-        WHERE volume_id=? AND kind='detail' AND archived=0
-        ORDER BY id ASC LIMIT ?
-        """, (volume_id, COMPACT_BATCH))
-        rows = c.fetchall()
-        if not rows:
-            return False
-
-        start_id, end_id = rows[0][0], rows[-1][0]
-        texts = [t for _, t in rows]
-        summary_text = _client_summary("\n".join(texts))
-
-        # Insert summary row
-        topic = detect_topic(" ".join(texts[:10]))
-        vbytes = embed(summary_text)
-        c.execute("""
-        INSERT INTO vectors(role, content, vector, topic, kind, volume_id, range_start, range_end, keywords, archived)
-        VALUES('system', ?, ?, ?, 'summary', ?, ?, ?, ?, 0)
-        """, (summary_text, vbytes, topic, volume_id, start_id, end_id, ""))
-
-        # Archive originals
-        c.execute("""
-        UPDATE vectors SET archived=1 WHERE volume_id=? AND id BETWEEN ? AND ?
-        """, (volume_id, start_id, end_id))
-        conn.commit()
-        return True
-    finally:
-        conn.close()
+    return "\n".join("• " + ln[:180] for ln in lines[:15])
 
 def summarize_if_needed() -> None:
-    """
-    Public entry-point. Assign a default volume if none, and compact when thresholds are exceeded.
-    Safe to call every turn.
-    """
+    """Compact details into summaries safely (fixed parameter binding)."""
     init_vector_db()
     conn = _connect()
     try:
-        vid = _first_default_volume(conn)
-        # Compact if needed
-        _ = compact_volume(vid)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM vectors WHERE kind='detail' AND archived=0"
+        ).fetchone()[0]
+        if count < COMPACT_THRESHOLD:
+            return
+        rows = conn.execute(
+            "SELECT id, content FROM vectors WHERE kind='detail' AND archived=0 ORDER BY id ASC LIMIT ?",
+            (COMPACT_BATCH,),
+        ).fetchall()
+        if not rows:
+            return
+        start_id, end_id = rows[0][0], rows[-1][0]
+        text = "\n".join(t for _, t in rows)
+        summary = _client_summary(text)
+        vec = embed(summary)
+        conn.execute(
+            "INSERT INTO vectors (role, content, vector, topic, kind, range_start, range_end, archived)"
+            " VALUES ('system', ?, ?, 'general', 'summary', ?, ?, 0)",
+            (summary, vec, start_id, end_id),
+        )
+        conn.execute(
+            "UPDATE vectors SET archived=1 WHERE id BETWEEN ? AND ? AND kind='detail'",
+            (start_id, end_id),
+        )
+        conn.commit()
+    except Exception as e:
+        print("[VectorMemorySummaryError]", e)
     finally:
         conn.close()
 
 # ---------------------------------------------------------------------
-# Hierarchical retrieval
+# Retrieval helpers restored
 # ---------------------------------------------------------------------
-def find_relevant_volume(query: str, k: int = 3) -> List[str]:
+
+# ---------------------------------------------------------------------
+# Self-repair for embedding dimension mismatch
+# ---------------------------------------------------------------------
+
+def _auto_fix_embedding_shapes(expected_dim: int = 1536):
     """
-    Return top-k volume IDs whose summaries best match the query.
+    Detects and cleans any old vectors with mismatched embedding dimension.
+    Keeps your persistent DB stable when embedding models change.
+    """
+    try:
+        init_vector_db()
+        conn = _connect()
+        c = conn.cursor()
+        rows = c.execute("SELECT id, vector FROM vectors LIMIT 50").fetchall()
+        bad_ids = []
+        for _id, blob in rows:
+            if not blob:
+                continue
+            arr = np.frombuffer(blob, dtype=np.float32)
+            if arr.shape[0] != expected_dim:
+                bad_ids.append(_id)
+        if bad_ids:
+            print(f"[VectorMemoryRepair] Found {len(bad_ids)} mismatched embeddings — deleting stale rows.")
+            c.executemany("DELETE FROM vectors WHERE id = ?", [(i,) for i in bad_ids])
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VectorMemoryRepairError] {e}")
+
+# Run this once at import time
+_auto_fix_embedding_shapes(1536)
+
+def retrieve_topic_summaries(query: str, k: int = 3) -> list[str]:
+    """
+    Return top-k short summaries across all vectors.
+    Used by main.py for memory context injection.
     """
     init_vector_db()
-    qv = np.frombuffer(embed(query), dtype=np.float32)
-
     conn = _connect()
-    c = conn.cursor()
-    c.execute("""
-    SELECT DISTINCT volume_id, vector FROM vectors
-    WHERE kind='summary' AND vector!=''
-    """)
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
+    try:
+        qv = np.frombuffer(embed(query), dtype=np.float32)
+        c = conn.cursor()
+        rows = c.execute(
+            "SELECT content, vector FROM vectors WHERE kind='summary' AND archived=0"
+        ).fetchall()
+        scored = []
+        for content, blob in rows:
+            v = np.frombuffer(blob, dtype=np.float32)
+            scored.append((_cosine_sim(qv, v), content))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [t for _, t in scored[:max(1, k)]]
+    except Exception as e:
+        print("[RetrieveTopicSummariesError]", e)
         return []
+    finally:
+        conn.close()
 
-    scored: List[Tuple[float, str]] = []
-    for vid, blob in rows:
-        v = np.frombuffer(blob, dtype=np.float32)
-        scored.append((_cosine_sim(qv, v), vid))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [vid for _, vid in scored[:max(1, k)] if vid]
 
-def recall_from_volume(query: str, volume_id: str, k: int = 5) -> List[str]:
+def hierarchical_recall(query: str, k_vols: int = 2, k_refs: int = 3) -> list[str]:
     """
-    Search detailed rows within a specific volume. Returns top-k content strings.
+    Two-level recall stub for compatibility; returns top detailed memories.
     """
     init_vector_db()
-    qv = np.frombuffer(embed(query), dtype=np.float32)
     conn = _connect()
-    c = conn.cursor()
-    c.execute("""
-    SELECT content, vector FROM vectors
-    WHERE volume_id=? AND kind='detail' AND archived=0
-    """, (volume_id,))
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
+    try:
+        qv = np.frombuffer(embed(query), dtype=np.float32)
+        c = conn.cursor()
+        rows = c.execute(
+            "SELECT content, vector FROM vectors WHERE kind='detail' AND archived=0"
+        ).fetchall()
+        scored = []
+        for content, blob in rows:
+            v = np.frombuffer(blob, dtype=np.float32)
+            scored.append((_cosine_sim(qv, v), content))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = [t for _, t in scored[:max(1, k_refs)]]
+        return top
+    except Exception as e:
+        print("[HierarchicalRecallError]", e)
         return []
-
-    scored: List[Tuple[float, str]] = []
-    for content, blob in rows:
-        v = np.frombuffer(blob, dtype=np.float32)
-        scored.append((_cosine_sim(qv, v), content))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [t for _, t in scored[:max(1, k)]]
-
-# ---------------------------------------------------------------------
-# Convenience: combined retrieval (flat + hierarchical)
-# ---------------------------------------------------------------------
-def retrieve_topic_summaries(query: str, k: int = 3) -> List[str]:
-    """
-    Return top-k short summaries across all volumes (kind='summary').
-    """
-    return search_similar(query, top_k=k, kind="summary")
-
-def hierarchical_recall(query: str, k_vols: int = 2, k_refs: int = 3) -> List[str]:
-    """
-    2-level recall: pick relevant volumes, then fetch top detailed refs in each.
-    """
-    vols = find_relevant_volume(query, k=k_vols)
-    out: List[str] = []
-    for vid in vols:
-        refs = recall_from_volume(query, vid, k=k_refs)
-        if refs:
-            out.append(f"Volume {vid}:\n" + "\n".join(refs))
-    return out
-
-# ---------------------------------------------------------------------
-# Small utility: export / maintenance
-# ---------------------------------------------------------------------
-def export_index() -> Dict[str, Any]:
-    """Return a small JSON summary of volumes and counts (for debugging/diagnostics)."""
-    init_vector_db()
-    conn = _connect()
-    c = conn.cursor()
-    c.execute("""
-    SELECT volume_id,
-           SUM(CASE WHEN kind='detail' AND archived=0 THEN 1 ELSE 0 END) as active_detail,
-           SUM(CASE WHEN kind='summary' THEN 1 ELSE 0 END) as summaries,
-           SUM(CASE WHEN kind='detail' AND archived=1 THEN 1 ELSE 0 END) as archived_detail
-    FROM vectors
-    GROUP BY volume_id
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return {
-        "volumes": [
-            {"volume_id": r[0], "active_detail": int(r[1]), "summaries": int(r[2]), "archived_detail": int(r[3])}
-            for r in rows
-        ]
-    }
+    finally:
+        conn.close()
