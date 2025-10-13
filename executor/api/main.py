@@ -24,6 +24,7 @@ from executor.utils.memory import (
     remember_exchange,
     save_fact,
     list_facts,
+    update_or_delete_from_text,
 )
 from executor.utils.vector_memory import (
     store_vector,
@@ -49,6 +50,7 @@ class ChatBody(BaseModel):
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
     """Prepend known user facts to context so the brain always sees them."""
     try:
@@ -93,7 +95,6 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
     """Assemble working context with recent turns, facts, summaries, and long-term recall."""
     context: list[dict[str, str]] = []
 
-    # --- core recall ---
     try:
         init_db_if_needed()
         context = recall_context(limit=8)
@@ -101,10 +102,10 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # --- facts: always inject even if recall failed ---
+    # Facts first
     context = inject_facts(context)
 
-    # --- summaries ---
+    # Summaries
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
@@ -118,7 +119,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
     except Exception as e:
         print("[VectorMemorySummaryError]", e)
 
-    # --- deep recall ---
+    # Deep recall
     try:
         deep_refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if deep_refs:
@@ -145,7 +146,7 @@ def root() -> Dict[str, Any]:
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    # Tolerate UI variations: message/prompt/content
+    # Tolerate UI variations
     try:
         raw = await request.json()
     except Exception:
@@ -160,10 +161,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
-    # Apply substitutions early
+    # Substitute known facts into the query
     text = substitute_facts_in_text(text)
 
-    # ---- ROUTER PHASE ----
+    # ROUTER phase
     try:
         router_output = route(text)
     except Exception as e:
@@ -171,30 +172,35 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
 
-    # ---- 🧠  No plugin actions → brain + memory ----
+    # 🧠 No plugin actions → brain + memory
     if not actions:
-        # Build full retrieval context
-        context = build_context_with_retrieval(text)
-
-        # 💾 capture new facts like "My X is Y"
         try:
+            # detect corrections ("forget that", "changed my mind")
+            update_or_delete_from_text(text)
+
+            # Capture new facts like "My X is Y"
             fact_match = re.search(
-                r"\bmy\s+([\w\s]+?)\s+(?:is|was|=)\s+(.+)", text, re.I
+                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
+                text,
+                re.I,
             )
             if fact_match:
                 key, val = fact_match.groups()
                 key = key.strip().lower().replace("favourite", "favorite")
-                save_fact(key, val.strip())
+                val = val.strip().rstrip(".!?")
+                print(f"[FactCapture] {key} = {val}")
+                save_fact(key, val)
         except Exception as e:
             print("[FactCaptureError]", e)
 
-        # ---- Generate reply ----
+        # Build full context
         try:
+            context = build_context_with_retrieval(text)
             reply = brain_chat(text, context=context)
         except Exception as e:
             reply = f"(brain offline) {e}"
 
-        # ---- Record exchanges + vectors (best-effort) ----
+        # Record exchanges and store vectors
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
@@ -206,7 +212,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
         return {"reply": reply}
 
-    # ---- PLUGIN DISPATCH ----
+    # Plugin dispatch
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -228,7 +234,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
         summary = result.get("summary") or ""
 
-        # 🧠 reflection: if plugin output is empty or terse, rewrite via brain w/ context
+        # Reflection: rewrite empty plugin results conversationally
         if len(summary.strip()) < 40 or summary.lower().startswith(
             ("no ", "error", "none")
         ):
@@ -267,19 +273,11 @@ def execute(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"{plugin} failed: {e}"}
     return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
+
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
 
-@app.get("/debug-db", include_in_schema=False)
-def debug_db():
-    from executor.utils.memory import DB_PATH, list_facts, save_fact
-    try:
-        save_fact("debug_key", "debug_value")
-        facts = list_facts()
-        return {"db_path": str(DB_PATH), "exists": DB_PATH.exists(), "facts": facts}
-    except Exception as e:
-        return {"error": str(e)}
 
 @app.on_event("startup")
 def startup_message() -> None:
