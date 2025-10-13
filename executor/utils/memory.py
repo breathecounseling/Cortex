@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional, List
 DB_PATH = Path("/data") / "memory.db"
 print(f"[MemoryDB] Using database at {DB_PATH}")
 
-
 def init_db():
     """Initialize the SQLite memory database if it does not exist."""
     conn = sqlite3.connect(DB_PATH)
@@ -26,64 +25,82 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def init_db_if_needed():
     try:
         init_db()
     except Exception as e:
         print("[InitDBError]", e)
 
-
 # ---------------------------------------------------------------------------
 # Core fact storage helpers
 # ---------------------------------------------------------------------------
 
 def save_fact(key: str, value: str):
-    """Save or update a simple key/value fact to memory."""
+    """Save or update a simple key/value fact to memory, with verification."""
     key = key.strip().lower()
     value = value.strip()
     init_db()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM memory WHERE key = ?", (key,))
-    c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
-    conn.close()
-    print(f"[Memory] Saved fact: {key} = {value}")
+    try:
+        conn = sqlite3.connect(DB_PATH, isolation_level="DEFERRED", timeout=10)
+        c = conn.cursor()
+        c.execute("DELETE FROM memory WHERE key = ?", (key,))
+        c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+        conn.close()
+        print(f"[Memory] ✅ Saved fact: {key} = {value}")
 
+        # immediate verification
+        verify = load_fact(key)
+        if verify != value:
+            print(f"[MemoryWarning] Fact '{key}' failed persistence check (got {verify})")
+        else:
+            print(f"[MemoryCheck] Verified persistence for '{key}'")
+    except Exception as e:
+        print(f"[MemoryError] save_fact failed: {e}")
 
 def delete_fact(key: str):
     """Delete a fact completely."""
     key = key.strip().lower()
     init_db()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM memory WHERE key = ?", (key,))
-    conn.commit()
-    conn.close()
-    print(f"[Memory] Deleted fact: {key}")
-
+    try:
+        conn = sqlite3.connect(DB_PATH, isolation_level="DEFERRED", timeout=10)
+        c = conn.cursor()
+        c.execute("DELETE FROM memory WHERE key = ?", (key,))
+        conn.commit()
+        conn.close()
+        print(f"[Memory] Deleted fact: {key}")
+    except Exception as e:
+        print(f"[MemoryError] delete_fact failed: {e}")
 
 def load_fact(key: str) -> Optional[str]:
     key = key.strip().lower()
     init_db()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT value FROM memory WHERE key = ?", (key,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else None
-
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT value FROM memory WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[MemoryError] load_fact failed: {e}")
+        return None
 
 def list_facts() -> Dict[str, str]:
+    """Return all key/value facts stored in memory."""
     init_db()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT key, value FROM memory")
-    rows = c.fetchall()
-    conn.close()
-    return {k: v for k, v in rows}
-
+    try:
+        conn = sqlite3.connect(DB_PATH, isolation_level="DEFERRED", timeout=10)
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM memory")
+        rows = c.fetchall()
+        conn.close()
+        facts = {k: v for k, v in rows}
+        print(f"[MemoryDump] Current facts:\n{json.dumps(facts, indent=2)}")
+        return facts
+    except Exception as e:
+        print(f"[MemoryError] list_facts failed: {e}")
+        return {}
 
 # ---------------------------------------------------------------------------
 # Conversational helpers for corrections / deletions
@@ -131,7 +148,6 @@ def update_or_delete_from_text(text: str):
 
     return {"action": "none"}
 
-
 # ---------------------------------------------------------------------------
 # Backward-compatibility helpers (self-healer, repair logs)
 # ---------------------------------------------------------------------------
@@ -147,7 +163,6 @@ def remember(*args, **kwargs):
     conn.commit()
     conn.close()
 
-
 def record_repair(*args, **kwargs):
     """Legacy support for self-healer logs."""
     init_db_if_needed()
@@ -158,7 +173,6 @@ def record_repair(*args, **kwargs):
     c.execute("INSERT INTO memory (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
-
 
 # ---------------------------------------------------------------------------
 # Conversational context
@@ -176,7 +190,6 @@ def remember_exchange(role: str, message: str, session: str = "default") -> None
         conn.close()
     except Exception as e:
         print(f"[MemoryError] failed to record exchange: {e}")
-
 
 def recall_context(session: str = "default", limit: int = 6) -> List[Dict[str, str]]:
     init_db_if_needed()
