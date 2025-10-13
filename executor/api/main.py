@@ -9,14 +9,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Core router + plugins
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 
-# 🧠 Brain + memory
 from executor.ai.router import chat as brain_chat
 from executor.utils.memory import (
     init_db_if_needed,
@@ -35,7 +33,6 @@ from executor.utils.vector_memory import (
 
 app = FastAPI()
 
-# Mount built frontend at /ui if present
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
@@ -48,21 +45,17 @@ class ChatBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Helpers
 # ---------------------------------------------------------------------------
 
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Prepend known user facts to context so the brain always sees them."""
     try:
         facts = list_facts()
         if facts:
             print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
             context.insert(
                 0,
-                {
-                    "role": "system",
-                    "content": f"Known user facts (authoritative): {json.dumps(facts)}",
-                },
+                {"role": "system", "content": f"Known user facts: {json.dumps(facts)}"},
             )
     except Exception as e:
         print("[InjectFactsError]", e)
@@ -70,24 +63,17 @@ def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def substitute_facts_in_text(text: str) -> str:
-    """Replace placeholders (my city, where I live, etc.) with stored facts for plugins."""
     try:
         facts = list_facts()
         for key, val in facts.items():
             lowkey = key.lower()
             if any(x in lowkey for x in ("live", "city", "location")):
                 text = re.sub(
-                    r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b",
-                    val,
-                    text,
-                    flags=re.I,
+                    r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b", val, text, flags=re.I
                 )
             elif "color" in lowkey:
                 text = re.sub(
-                    r"\b(my\s+favorite\s+color|favorite\s+color)\b",
-                    val,
-                    text,
-                    flags=re.I,
+                    r"\b(my\s+favorite\s+color|favorite\s+color)\b", val, text, flags=re.I
                 )
         return text
     except Exception as e:
@@ -96,9 +82,7 @@ def substitute_facts_in_text(text: str) -> str:
 
 
 def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
-    """Assemble working context with recent turns, facts, summaries, and long-term recall."""
     context: list[dict[str, str]] = []
-
     try:
         init_db_if_needed()
         context = recall_context(limit=8)
@@ -106,34 +90,19 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # Always inject known facts first
     context = inject_facts(context)
 
-    # Summaries
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            context.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": "Relevant history summaries:\n" + "\n".join(summaries),
-                },
-            )
+            context.insert(0, {"role": "system", "content": "\n".join(summaries)})
     except Exception as e:
         print("[VectorMemorySummaryError]", e)
 
-    # Deep recall
     try:
         deep_refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if deep_refs:
-            context.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": "Detailed references:\n" + "\n".join(deep_refs),
-                },
-            )
+            context.insert(0, {"role": "system", "content": "\n".join(deep_refs)})
     except Exception as e:
         print("[VectorMemoryDetailError]", e)
 
@@ -150,25 +119,16 @@ def root() -> Dict[str, Any]:
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    """Main chat endpoint"""
     try:
         raw = await request.json()
     except Exception:
         raw = {}
-    text = (
-        body.text
-        or raw.get("message")
-        or raw.get("prompt")
-        or raw.get("content")
-        or ""
-    ).strip()
+    text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
     if not text:
         return {"reply": "How can I help?"}
 
-    # Substitute known facts into the query for plugin use
     text = substitute_facts_in_text(text)
 
-    # ROUTER phase
     try:
         router_output = route(text)
     except Exception as e:
@@ -176,17 +136,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
 
-    # 🧠 No plugin actions → brain + memory
     if not actions:
         try:
-            # detect corrections ("forget that", "changed my mind")
             update_or_delete_from_text(text)
 
-            # Capture new facts like "My X is Y" or "My X's Y"
+            # ✅ fixed pattern — captures text even with punctuation at the end
             fact_match = re.search(
-                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
-                text,
-                re.I,
+                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+(.+)", text, re.I
             )
             if fact_match:
                 key, val = fact_match.groups()
@@ -197,14 +153,12 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         except Exception as e:
             print("[FactCaptureError]", e)
 
-        # Build full context with facts, summaries, and history
         try:
             context = build_context_with_retrieval(text)
             reply = brain_chat(text, context=context)
         except Exception as e:
             reply = f"(brain offline) {e}"
 
-        # Record exchanges and store vectors
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
@@ -231,17 +185,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         elif plugin == "feedback":
             result = feedback.handle(args)
         else:
-            result = {
-                "status": "ok",
-                "summary": router_output.get("assistant_message", "Okay."),
-            }
+            result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
 
         summary = result.get("summary") or ""
 
-        # Reflection: rewrite empty plugin results conversationally
-        if len(summary.strip()) < 40 or summary.lower().startswith(
-            ("no ", "error", "none")
-        ):
+        if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
             try:
                 context = build_context_with_retrieval(text)
                 reply = brain_chat(
