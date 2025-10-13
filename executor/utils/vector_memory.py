@@ -17,7 +17,7 @@ SUMMARY_MODEL = os.getenv("CORTEX_SUMMARY_MODEL", "gpt-4o-mini")
 
 DB_PATH = Path("/data") / "vector_memory.db"
 os.makedirs(DB_PATH.parent.as_posix(), exist_ok=True)
-FALLBACK_DIM = int(os.getenv("CORTEX_EMBED_DIM", "384"))
+FALLBACK_DIM = 1536
 COMPACT_THRESHOLD = int(os.getenv("CORTEX_COMPACT_THRESHOLD", "600"))
 COMPACT_BATCH = int(os.getenv("CORTEX_COMPACT_BATCH", "250"))
 DEFAULT_TOPIC = "general"
