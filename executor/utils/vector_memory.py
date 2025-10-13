@@ -152,6 +152,38 @@ def summarize_if_needed() -> None:
 # Retrieval helpers restored
 # ---------------------------------------------------------------------
 
+# ---------------------------------------------------------------------
+# Self-repair for embedding dimension mismatch
+# ---------------------------------------------------------------------
+
+def _auto_fix_embedding_shapes(expected_dim: int = 1536):
+    """
+    Detects and cleans any old vectors with mismatched embedding dimension.
+    Keeps your persistent DB stable when embedding models change.
+    """
+    try:
+        init_vector_db()
+        conn = _connect()
+        c = conn.cursor()
+        rows = c.execute("SELECT id, vector FROM vectors LIMIT 50").fetchall()
+        bad_ids = []
+        for _id, blob in rows:
+            if not blob:
+                continue
+            arr = np.frombuffer(blob, dtype=np.float32)
+            if arr.shape[0] != expected_dim:
+                bad_ids.append(_id)
+        if bad_ids:
+            print(f"[VectorMemoryRepair] Found {len(bad_ids)} mismatched embeddings — deleting stale rows.")
+            c.executemany("DELETE FROM vectors WHERE id = ?", [(i,) for i in bad_ids])
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VectorMemoryRepairError] {e}")
+
+# Run this once at import time
+_auto_fix_embedding_shapes(1536)
+
 def retrieve_topic_summaries(query: str, k: int = 3) -> list[str]:
     """
     Return top-k short summaries across all vectors.
