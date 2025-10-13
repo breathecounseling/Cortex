@@ -1,9 +1,8 @@
 # executor/api/main.py
 from __future__ import annotations
-import os, re, json
+import os, json
 from pathlib import Path
 from typing import Any, Dict
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +22,7 @@ from executor.utils.memory import (
     recall_context,
     remember_exchange,
     save_fact,
+    delete_fact,
     list_facts,
     update_or_delete_from_text,
 )
@@ -33,9 +33,13 @@ from executor.utils.vector_memory import (
     hierarchical_recall,
 )
 
+# 🧩 Semantic understanding modules
+from executor.core.language_intent import classify_language_intent
+from executor.core.intent_facts import detect_fact_or_question
+
 app = FastAPI()
 
-# Mount built frontend at /ui if present
+# Mount frontend if built
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
@@ -52,57 +56,25 @@ class ChatBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 def inject_facts(context: list[dict[str, str]]) -> list[dict[str, str]]:
-    """
-    Prepend known user facts to context so the brain always sees them.
-    Adds a system note when no current facts exist.
-    """
+    """Prepend known user facts to the LLM context."""
     try:
-        facts = list_facts()
+        facts = {k: v for k, v in list_facts().items() if k != "last_fact_query"}
         if facts:
             print(f"[InjectFacts] {json.dumps(facts, indent=2)}")
             context.insert(
                 0,
-                {"role": "system", "content": f"Known user facts (authoritative): {json.dumps(facts)}"},
-            )
-        else:
-            # If no stored facts, warn the LLM that old chat turns may be outdated
-            context.insert(
-                0,
-                {"role": "system", "content": "Note: Prior chat messages may reference outdated or forgotten facts. Use only current conversation data."},
+                {
+                    "role": "system",
+                    "content": f"Known user facts: {json.dumps(facts)}",
+                },
             )
     except Exception as e:
         print("[InjectFactsError]", e)
     return context
 
 
-def substitute_facts_in_text(text: str) -> str:
-    """Replace placeholders (my city, where I live, etc.) with stored facts for plugins."""
-    try:
-        facts = list_facts()
-        for key, val in facts.items():
-            lowkey = key.lower()
-            if any(x in lowkey for x in ("live", "city", "location")):
-                text = re.sub(
-                    r"\b(where\s+i\s+live|my\s+city|in\s+my\s+city)\b",
-                    val,
-                    text,
-                    flags=re.I,
-                )
-            elif "color" in lowkey:
-                text = re.sub(
-                    r"\b(my\s+favorite\s+color|favorite\s+color)\b",
-                    val,
-                    text,
-                    flags=re.I,
-                )
-        return text
-    except Exception as e:
-        print("[SubstituteFactsError]", e)
-        return text
-
-
 def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
-    """Assemble working context with recent turns, facts, summaries, and long-term recall."""
+    """Build full context with recent messages, facts, and memory summaries."""
     context: list[dict[str, str]] = []
 
     try:
@@ -112,28 +84,19 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # Always inject facts or note outdated data
     context = inject_facts(context)
 
-    # Summaries
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            context.insert(
-                0,
-                {"role": "system", "content": "Relevant history summaries:\n" + "\n".join(summaries)},
-            )
+            context.insert(0, {"role": "system", "content": "\n".join(summaries)})
     except Exception as e:
         print("[VectorMemorySummaryError]", e)
 
-    # Deep recall
     try:
         deep_refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if deep_refs:
-            context.insert(
-                0,
-                {"role": "system", "content": "Detailed references:\n" + "\n".join(deep_refs)},
-            )
+            context.insert(0, {"role": "system", "content": "\n".join(deep_refs)})
     except Exception as e:
         print("[VectorMemoryDetailError]", e)
 
@@ -143,7 +106,6 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Cortex API is running."}
@@ -151,19 +113,17 @@ def root() -> Dict[str, Any]:
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    """Main chat endpoint"""
+    """Main conversational endpoint."""
     try:
         raw = await request.json()
     except Exception:
         raw = {}
+
     text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
     if not text:
         return {"reply": "How can I help?"}
 
-    # Substitute known facts into the query for plugin use
-    text = substitute_facts_in_text(text)
-
-    # ROUTER phase
+    # ROUTER phase (for plugins)
     try:
         router_output = route(text)
     except Exception as e:
@@ -171,50 +131,68 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
 
-    # 🧠 No plugin actions → brain + memory
+    # 🧠 No plugin actions → Semantic reasoning + memory
     if not actions:
         try:
-            # detect corrections ("forget that", "changed my mind")
-            mem_action = update_or_delete_from_text(text)
-            if mem_action.get("action") == "deleted":
-                key = mem_action.get("key") or "that information"
-                return {"reply": f"Got it — I've forgotten {key}."}
+            update_or_delete_from_text(text)
 
-            # Capture new facts like "My X is Y"
-            fact_match = re.search(
-                r"\bmy\s+([\w\s]+?)\s*(?:is|was|=|'s|:)\s+([^.?!]+)",
-                text,
-                re.I,
-            )
-            if fact_match:
-                key, val = fact_match.groups()
-                key = key.strip().lower().replace("favourite", "favorite")
-                val = val.strip().rstrip(".!?")
-                print(f"[FactCapture] {key} = {val}")
+            # ─────────────────────────────────────────────
+            # Semantic fact classification
+            # ─────────────────────────────────────────────
+            lang_intent = classify_language_intent(text)
+            fact_intent = detect_fact_or_question(text)
+
+            # Direct declaration ("My favorite color is blue")
+            if fact_intent["type"] == "fact.declaration" and fact_intent["key"] and fact_intent["value"]:
+                key = fact_intent["key"].strip().lower()
+                val = fact_intent["value"].strip()
+                print(f"[FactCapture.Semantic] {key} = {val}")
                 save_fact(key, val)
-        except Exception as e:
-            print("[FactCaptureError]", e)
 
-        # Build full context with facts, summaries, and history
+            # Correction or update ("Actually it's green now")
+            elif fact_intent["type"] == "fact.correction" and fact_intent["key"] and fact_intent["value"]:
+                key = fact_intent["key"].strip().lower()
+                val = fact_intent["value"].strip()
+                print(f"[FactUpdate.Semantic] {key} = {val}")
+                save_fact(key, val)
+
+            # Fact query ("What is my favorite color?")
+            elif fact_intent["type"] == "fact.query" and fact_intent["key"]:
+                save_fact("last_fact_query", fact_intent["key"].strip().lower())
+                print(f"[FactQuery.Semantic] pending key={fact_intent['key']}")
+
+            # Short answer to previous question ("Blue" after asking favorite color)
+            elif len(text.split()) <= 3:
+                facts = list_facts()
+                last_key = facts.get("last_fact_query")
+                if last_key:
+                    print(f"[FactAutoLink] {last_key} = {text}")
+                    save_fact(last_key, text.strip())
+                    delete_fact("last_fact_query")
+
+        except Exception as e:
+            print("[FactCaptureError.Semantic]", e)
+
+        # Build conversational + factual context
+        context = build_context_with_retrieval(text)
+
         try:
-            context = build_context_with_retrieval(text)
             reply = brain_chat(text, context=context)
         except Exception as e:
             reply = f"(brain offline) {e}"
 
-        # Record exchanges and store vectors
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
             store_vector("user", text)
             store_vector("assistant", reply)
-            summarize_if_needed()
+            # summarize_if_needed() temporarily disabled until SQL fix
         except Exception as e:
             print("[VectorStoreError]", e)
 
         return {"reply": reply}
 
-    # Plugin dispatch
+    # Plugin dispatch path
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -233,42 +211,17 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
         summary = result.get("summary") or ""
 
-        # Reflection: rewrite empty plugin results conversationally
         if len(summary.strip()) < 40 or summary.lower().startswith(("no ", "error", "none")):
-            try:
-                context = build_context_with_retrieval(text)
-                reply = brain_chat(
-                    f"{text}\n\nPlugin output:\n{summary}\n\n"
-                    "Respond conversationally or fill in any missing information.",
-                    context=context,
-                )
-                return {"reply": reply}
-            except Exception as e:
-                print("[ReflectionError]", e)
+            context = build_context_with_retrieval(text)
+            reply = brain_chat(
+                f"{text}\n\nPlugin output:\n{summary}\n\nRespond conversationally or clarify missing information.",
+                context=context,
+            )
+            return {"reply": reply}
 
         return {"reply": summary}
     except Exception as e:
         return {"reply": f"Plugin error ({plugin}): {e}"}
-
-
-@app.post("/execute")
-def execute(body: Dict[str, Any]) -> Dict[str, Any]:
-    plugin = body.get("plugin")
-    args = body.get("args", {})
-    if not plugin:
-        return {"status": "error", "message": "Missing plugin name."}
-    try:
-        if plugin == "web_search":
-            return web_search.handle(args)
-        if plugin == "weather_plugin":
-            return weather_plugin.handle(args)
-        if plugin == "google_places":
-            return google_places.handle(args)
-        if plugin == "feedback":
-            return feedback.handle(args)
-    except Exception as e:
-        return {"status": "error", "message": f"{plugin} failed: {e}"}
-    return {"status": "error", "message": f"Unknown plugin: {plugin}"}
 
 
 @app.get("/health", include_in_schema=False)
@@ -277,5 +230,5 @@ def health():
 
 
 @app.on_event("startup")
-def startup_message() -> None:
-    print("✅ Cortex API started — ready for chat and plugin actions.")
+def startup_message():
+    print("✅ Cortex API started — semantic memory active.")
