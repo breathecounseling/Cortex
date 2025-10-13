@@ -1,4 +1,3 @@
-# executor/api/main.py
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -143,18 +142,18 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     # 4️⃣ Handle fact declarations / queries via graph
     try:
-        # Declarative
+        # Declarative (regex-level)
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
             return {"reply": g_fact_confirm}
 
-        # Semantic declaration
-if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
-    domain = gmem.detect_domain_from_key(semantic["key"])
-    value = sanitize_value(semantic["value"])
-    gmem.upsert_node(domain, semantic["key"], value, scope="global")
-    print(f"[Graph] Upserted: {domain}.{semantic['key']} = {value}")
-    return {"reply": f"Got it — your {semantic['key']} is {value}."}
+        # Semantic declaration (LLM-level)
+        if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
+            domain = gmem.detect_domain_from_key(semantic["key"])
+            value = sanitize_value(semantic["value"])
+            gmem.upsert_node(domain, semantic["key"], value, scope="global")
+            print(f"[Graph] Upserted: {domain}.{semantic['key']} = {value}")
+            return {"reply": f"Got it — your {semantic['key']} is {value}."}
 
         # Queries
         if semantic["type"] == "fact.query" and semantic.get("key"):
@@ -191,10 +190,7 @@ if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.g
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # 6️⃣ Plugin dispatch (unchanged)
-    ...
-
-    # 6️⃣ Plugin dispatch (if router suggested one)
+    # 6️⃣ Plugin dispatch
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
