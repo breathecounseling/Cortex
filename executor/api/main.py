@@ -114,24 +114,14 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     if not text:
         return {"reply": "How can I help?"}
 
-    # 1️⃣ Semantic classification: declaration, question, meta
+    # 1️⃣ Semantic classification
     from executor.core.language_intent import classify_language_intent
     from executor.core.intent_facts import detect_fact_or_question
-
     lang_type = classify_language_intent(text)
     semantic = detect_fact_or_question(text)
     print(f"[LangIntent] {lang_type} :: {text}")
 
-    # 2️⃣ Handle delete/correction commands
-    #    First let the flat memory handle generic phrases (back-compat),
-    #    then give graph memory a chance to target domain-specific forgets.
-    try:
-        action = update_or_delete_from_text(text)
-        if action.get("action") == "deleted":
-            return {"reply": f"Got it — I've forgotten {action.get('key', 'that')}."}
-    except Exception as e:
-        print("[ForgetError.Flat]", e)
-
+    # 2️⃣ Handle forget/correction
     try:
         g_forget = gmem.forget_fact_or_location(text)
         if g_forget:
@@ -139,7 +129,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[ForgetError.Graph]", e)
 
-    # 3️⃣ Graph memory: locations (overwrite-safe) & questions
+    # 3️⃣ Handle location logic
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
@@ -150,44 +140,31 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[GraphLocationError]", e)
 
-    # 4️⃣ General facts via graph (overwrite-safe),
-    #    and semantic fact handling
+    # 4️⃣ Handle fact declarations / queries via graph
     try:
-        # Direct graph-friendly fact declarations (no regex)
+        # Declarative
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
             return {"reply": g_fact_confirm}
+
+        # Semantic declaration
+        if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
+            domain = gmem.detect_domain_from_key(semantic["key"])
+            gmem.upsert_node(domain, semantic["key"], semantic["value"], scope="global")
+            print(f"[Graph] Upserted: {domain}.{semantic['key']} = {semantic['value']}")
+            return {"reply": f"Got it — your {semantic['key']} is {semantic['value']}."}
+
+        # Queries
+        if semantic["type"] == "fact.query" and semantic.get("key"):
+            domain = gmem.detect_domain_from_key(semantic["key"])
+            node = gmem.get_node(domain, semantic["key"], scope="global")
+            if node and node.get("value"):
+                return {"reply": f"Your {semantic['key']} is {node['value']}."}
+            return {"reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."}
     except Exception as e:
         print("[GraphFactError]", e)
 
-    if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
-        # store in both flat and graph (domain-agnostic "general" scope)
-        save_fact(semantic["key"], semantic["value"])
-        try:
-            gmem.upsert_node("general", semantic["key"], semantic["value"], scope="global")
-        except Exception as e:
-            print("[GraphUpsertError]", e)
-        print(f"[Memory] Saved: {semantic['key']} = {semantic['value']}")
-        return {"reply": f"Got it — your {semantic['key']} is {semantic['value']}."}
-
-    if semantic["type"] == "fact.query" and semantic.get("key"):
-        # Prefer graph value if present, else fall back to flat KV
-        val = None
-        try:
-            node = gmem.get_node("general", semantic["key"], scope="global")
-            val = node["value"] if node else None
-        except Exception as e:
-            print("[GraphGetError]", e)
-        if not val:
-            val = list_facts().get(semantic["key"])
-        if val:
-            return {"reply": f"Your {semantic['key']} is {val}."}
-        # store pending key in flat memory for short answer linking (if you still use it)
-        save_fact("last_fact_query", semantic["key"])
-        print(f"[Memory] Saved: last_fact_query = {semantic['key']}")
-        return {"reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."}
-
-    # 5️⃣ Route via core router (plugins etc.)
+    # 5️⃣ Route via router or fall back to brain
     try:
         router_output = route(text)
     except Exception as e:
@@ -196,7 +173,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
     if not actions:
-        # 🧠 Memory-backed brain response
         context = build_context_with_retrieval(text)
         try:
             reply = brain_chat(text, context=context)
@@ -211,8 +187,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             summarize_if_needed()
         except Exception as e:
             print("[VectorStoreError]", e)
-
         return {"reply": reply}
+
+    # 6️⃣ Plugin dispatch (unchanged)
+    ...
 
     # 6️⃣ Plugin dispatch (if router suggested one)
     action = actions[0]
