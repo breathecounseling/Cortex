@@ -153,7 +153,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             return {"reply": confirm}
         maybe_loc = gmem.answer_location_question(text)
         if maybe_loc:
-            # Remember context for correction
             _last_question["domain"], _last_question["key"] = "location", "trip"
             return {"reply": maybe_loc}
     except Exception as e:
@@ -162,7 +161,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # 3.5️⃣ Always check for correction / change phrases first
     try:
         if re.search(r"(changed my mind|actually[,.\s]*it'?s|no[,.\s]*it'?s)", text.lower()):
-            # If we know what the user asked last, rewrite text explicitly
             if _last_question["domain"]:
                 cleaned = re.sub(r"(?i)(?:i\s+changed\s+my\s+mind|actually|no)[^a-z']*it'?s", "", text).strip()
                 text_explicit = f"my {_last_question['key']} is {cleaned}"
@@ -179,7 +177,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         # Declarative pattern match
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
-            # Remember context for potential corrections
             try:
                 m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
                 if m:
@@ -207,6 +204,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         if semantic["type"] == "fact.query" and semantic.get("key"):
             domain = gmem.detect_domain_from_key(semantic["key"])
             node = gmem.get_node(domain, semantic["key"], scope="global")
+            # ✅ remember last question before returning
             _last_question["domain"], _last_question["key"] = domain, semantic["key"]
             if node and node.get("value"):
                 return {"reply": f"Your {semantic['key']} is {node['value']}."}
@@ -285,4 +283,4 @@ def health():
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Cortex API started — Phase 2.8.1 Hotfix-C with context-aware corrections.")
+    print("✅ Cortex API started — Phase 2.8.1 Final with context-tracking corrections.")
