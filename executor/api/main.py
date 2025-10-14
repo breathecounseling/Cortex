@@ -100,6 +100,12 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
 
 
 # ------------------------------------------------------------
+# Conversation context cache  (single-turn memory)
+# ------------------------------------------------------------
+_last_question: Dict[str, str] = {"domain": None, "key": None}
+
+
+# ------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------
 @app.get("/")
@@ -147,6 +153,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             return {"reply": confirm}
         maybe_loc = gmem.answer_location_question(text)
         if maybe_loc:
+            # Remember context for correction
+            _last_question["domain"], _last_question["key"] = "location", "trip"
             return {"reply": maybe_loc}
     except Exception as e:
         print("[GraphLocationError]", e)
@@ -154,7 +162,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # 3.5️⃣ Always check for correction / change phrases first
     try:
         if re.search(r"(changed my mind|actually[,.\s]*it'?s|no[,.\s]*it'?s)", text.lower()):
-            correction = gmem.extract_and_save_fact(text)
+            # If we know what the user asked last, rewrite text explicitly
+            if _last_question["domain"]:
+                cleaned = re.sub(r"(?i)(?:i\s+changed\s+my\s+mind|actually|no)[^a-z']*it'?s", "", text).strip()
+                text_explicit = f"my {_last_question['key']} is {cleaned}"
+                correction = gmem.extract_and_save_fact(text_explicit)
+            else:
+                correction = gmem.extract_and_save_fact(text)
             if correction:
                 return {"reply": correction}
     except Exception as e:
@@ -165,6 +179,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         # Declarative pattern match
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
+            # Remember context for potential corrections
+            try:
+                m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
+                if m:
+                    key = m.group(1).strip().lower()
+                    _last_question["domain"] = gmem.detect_domain_from_key(key)
+                    _last_question["key"] = key
+            except Exception:
+                pass
             return {"reply": g_fact_confirm}
 
         # Semantic declaration
@@ -176,6 +199,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             domain = gmem.detect_domain_from_key(semantic["key"])
             value = sanitize_value(semantic["value"])
             gmem.upsert_node(domain, semantic["key"], value, scope="global")
+            _last_question["domain"], _last_question["key"] = domain, semantic["key"]
             print(f"[Graph] Upserted: {domain}.{semantic['key']} = {value}")
             return {"reply": f"Got it — your {semantic['key']} is {value}."}
 
@@ -183,6 +207,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         if semantic["type"] == "fact.query" and semantic.get("key"):
             domain = gmem.detect_domain_from_key(semantic["key"])
             node = gmem.get_node(domain, semantic["key"], scope="global")
+            _last_question["domain"], _last_question["key"] = domain, semantic["key"]
             if node and node.get("value"):
                 return {"reply": f"Your {semantic['key']} is {node['value']}."}
             return {
@@ -260,4 +285,4 @@ def health():
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Cortex API started — Phase 2.8.1 with correction intent hook.")
+    print("✅ Cortex API started — Phase 2.8.1 Hotfix-C with context-aware corrections.")
