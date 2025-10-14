@@ -32,8 +32,7 @@ def init_graph() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_nodes_dks ON graph_nodes(domain,nkey,scope)")
     conn.commit(); conn.close()
 
-def _now() -> int:
-    return int(time.time())
+def _now() -> int: return int(time.time())
 
 def _safe_json(obj: Any) -> str:
     try:
@@ -63,7 +62,7 @@ def _row_to_node(row: Tuple) -> Dict[str, Any]:
 # ---------------------------------------------------------------------
 def upsert_node(domain: str, key: str, value: str, scope: str = "global",
                 meta: Optional[Dict[str, Any]] = None) -> int:
-    """Insert or overwrite node by (domain,key,scope). Creates domain automatically."""
+    """Insert or overwrite node by (domain,key,scope)."""
     init_graph()
     conn = _connect(); c = conn.cursor()
     ts = _now()
@@ -108,11 +107,9 @@ _DOMAIN_SCOPES = {
 }
 
 def get_all_scopes_for_domain(domain: str) -> List[str]:
-    """Return known scopes for a domain."""
     return _DOMAIN_SCOPES.get(domain, ["global"])
 
 def infer_location_key_and_scope(text: str) -> (Optional[str], Optional[str]):
-    """Infer which location key/scope user refers to."""
     t = text.lower()
     if "home" in t or "live" in t:
         return ("home", "home")
@@ -152,7 +149,7 @@ def forget_fact_or_location(text: str) -> Optional[str]:
     if m:
         key = (m.groupdict().get("key") or "").strip().lower()
         val = (m.groupdict().get("val") or "").strip()
-        dom = detect_domain_from_key(key or "color")  # fallback domain
+        dom = detect_domain_from_key(key or "color")
         scopes = get_all_scopes_for_domain(dom)
         for scope in scopes:
             delete_node(dom, key or "favorite color", scope)
@@ -183,7 +180,6 @@ def forget_fact_or_location(text: str) -> Optional[str]:
 # AUTO-EXTENSIBLE DOMAIN DETECTION
 # ---------------------------------------------------------------------
 def detect_domain_from_key(key: str) -> str:
-    """Infer or create a domain name dynamically from a fact key."""
     k = key.lower()
     if "color" in k: return "color"
     if "food" in k: return "food"
@@ -244,26 +240,40 @@ def answer_location_question(text: str) -> Optional[str]:
 # FACT / COLOR / FOOD / MISC
 # ---------------------------------------------------------------------
 _FACT_DECL_RX = re.compile(r"\bmy\s+(?P<key>[\w\s]+?)\s+(?:is|was|=|'s)\s+(?P<val>[^.?!]+)", re.I)
-# Extended change regex supports optional key and value
+# Extended change regex supports commas, periods, optional key/value
 _CHANGE_RX = re.compile(
-    r"\b(i\s+changed\s+my\s+mind(?:\s+about\s+(?P<key>[\w\s]+))?"
-    r"|no,\s*it'?s|actually\s+it'?s)\s+(?P<val>[^.?!]+)",
+    r"(?:i\s+changed\s+my\s+mind[,.]?(?:\s*(?:about|on)?\s+(?P<key>[\w\s]+))?"
+    r"|no[,.\s]*it'?s|actually[,.\s]*it'?s)"
+    r"\s+(?P<val>[^.?!]+)",
     re.I,
 )
 
+def guess_recent_key() -> Tuple[str, str]:
+    """Return (domain,key) of most recently updated fact for fallback."""
+    init_graph()
+    conn = _connect(); c = conn.cursor()
+    c.execute("""SELECT domain,nkey FROM graph_nodes ORDER BY updated_at DESC LIMIT 1""")
+    row = c.fetchone(); conn.close()
+    if row:
+        return row[0], row[1]
+    return ("color", "favorite color")
+
 def extract_and_save_fact(text: str) -> Optional[str]:
     """Detect fact statements and route them to appropriate or new domain."""
-    # Correction first
+    # Corrections first
     m_change = _CHANGE_RX.search(text or "")
     if m_change:
         key = (m_change.groupdict().get("key") or "").strip().lower()
-        val = m_change.groupdict().get("val").strip().rstrip(".!?")
-        dom = detect_domain_from_key(key or "color")
+        val = sanitize_value(m_change.groupdict().get("val").strip().rstrip(".!?"))
+        if key:
+            dom = detect_domain_from_key(key)
+        else:
+            dom, key = guess_recent_key()
         scopes = get_all_scopes_for_domain(dom)
         for scope in scopes:
-            delete_node(dom, key or "favorite color", scope)
-        upsert_node(dom, key or "favorite color", sanitize_value(val), scope=scopes[0])
-        return f"Got it — your {key or 'favorite color'} is {val}."
+            delete_node(dom, key, scope)
+        upsert_node(dom, key, val, scope=scopes[0])
+        return f"Got it — your {key} is {val}."
 
     # Standard declaration
     m = _FACT_DECL_RX.search(text or "")
