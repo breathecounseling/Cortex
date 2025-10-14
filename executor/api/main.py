@@ -2,23 +2,27 @@
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Sanitizer
+# Sanitizer + Graph
 from executor.utils.sanitizer import sanitize_value
+from executor.utils import memory_graph as gmem
 
-# Core router + plugins
+# Unified semantic intent + persistent session context
+from executor.core.semantic_intent import analyze as analyze_intent
+from executor.utils.session_context import set_last_fact, get_last_fact
+
+# Router + plugins + brain + classic memory/vector (unchanged integrations)
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 
-# 🧠 Brain + flat memory
 from executor.ai.router import chat as brain_chat
 from executor.utils.memory import (
     init_db_if_needed,
@@ -29,17 +33,12 @@ from executor.utils.memory import (
     update_or_delete_from_text,
 )
 
-# Vector memory
 from executor.utils.vector_memory import (
     store_vector,
     summarize_if_needed,
     retrieve_topic_summaries,
     hierarchical_recall,
 )
-
-# 🌐 Graph memory
-from executor.utils import memory_graph as gmem
-
 
 # ------------------------------------------------------------
 # FastAPI setup
@@ -50,176 +49,155 @@ _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "di
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
 
-
 class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
     system: str | None = None
-
+    session_id: str | None = None  # optional caller-provided session id
 
 # ------------------------------------------------------------
-# Helper utilities
-# ------------------------------------------------------------
-def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
-    """Build recent chat + summaries + vector recall context."""
-    context: list[dict[str, str]] = []
+def _session_id(request: Request, body: ChatBody) -> str:
+    return body.session_id or request.headers.get("X-Session-ID") or "default"
+
+def _inject_context_messages(query: str) -> list[dict[str,str]]:
+    ctx: list[dict[str,str]] = []
     try:
         init_db_if_needed()
-        context = recall_context(limit=8)
+        ctx = recall_context(limit=8)
     except Exception as e:
         print("[ContextRecallError]", e)
-        context = []
-
-    # Facts
+        ctx = []
     try:
         facts = list_facts()
         if facts:
-            context.insert(
-                0, {"role": "system", "content": f"Known facts: {json.dumps(facts)}"}
-            )
+            ctx.insert(0, {"role":"system","content": f"Known facts: {json.dumps(facts)}"})
     except Exception as e:
         print("[InjectFactsError]", e)
-
-    # Summaries
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            context.insert(0, {"role": "system", "content": "\n".join(summaries)})
+            ctx.insert(0, {"role":"system","content":"\n".join(summaries)})
     except Exception as e:
         print("[VectorSummaryError]", e)
-
-    # Hierarchical recall
     try:
         refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if refs:
-            context.insert(0, {"role": "system", "content": "\n".join(refs)})
+            ctx.insert(0, {"role":"system","content":"\n".join(refs)})
     except Exception as e:
         print("[VectorRecallError]", e)
+    return ctx
 
-    return context
-
-
-# ------------------------------------------------------------
-# Conversation context cache  (single-turn memory)
-# ------------------------------------------------------------
-_last_question: Dict[str, str] = {"domain": None, "key": None}
-
-
-# ------------------------------------------------------------
-# Routes
 # ------------------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Cortex API is running."}
 
+@app.get("/health", include_in_schema=False)
+def health():
+    return JSONResponse({"status": "ok"})
 
+# ------------------------------------------------------------
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    """Main conversational endpoint with semantic + graph memory."""
     try:
         raw = await request.json()
     except Exception:
         raw = {}
-    text = (
-        body.text
-        or raw.get("message")
-        or raw.get("prompt")
-        or raw.get("content")
-        or ""
-    ).strip()
+    text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
     if not text:
         return {"reply": "How can I help?"}
 
-    # 1️⃣ Semantic classification
-    from executor.core.language_intent import classify_language_intent
-    from executor.core.intent_facts import detect_fact_or_question
+    session_id = _session_id(request, body)
 
-    lang_type = classify_language_intent(text)
-    semantic = detect_fact_or_question(text)
-    print(f"[LangIntent] {lang_type} :: {text}")
+    # 1) Unified semantic intent
+    intent = analyze_intent(text)
+    print(f"[SemanticIntent] {intent}")
 
-    # 2️⃣ Handle forget / correction
+    # 2) Resolve domain/key/value with persistence + canonicalization
+    #    - If analyzer omitted domain/key in corrections, use persistent last fact
+    domain: Optional[str] = intent.get("domain")
+    key_raw: Optional[str] = intent.get("key")
+    value_raw: Optional[str] = intent.get("value")
+    scope: Optional[str] = intent.get("scope")
+    key = gmem.canonicalize_key(key_raw) if key_raw else None
+    value = sanitize_value(value_raw) if value_raw else value_raw
+
+    if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
+        # Try session context
+        last_dom, last_key = get_last_fact(session_id)
+        if not domain: domain = last_dom
+        if not key: key = gmem.canonicalize_key(last_key) if last_key else None
+
+    # Infer domain from key if still missing (color/food/location/misc)
+    if (intent["intent"].startswith("fact") and not domain and key):
+        domain = gmem.detect_domain_from_key(key)
+
+    # 3) Execute memory action
     try:
-        g_forget = gmem.forget_fact_or_location(text)
-        if g_forget:
-            return {"reply": g_forget}
-    except Exception as e:
-        print("[ForgetError.Graph]", e)
+        # --- Location updates/queries (authoritative via analyzer) ---
+        if intent["intent"] == "location.update" and scope and key == scope:
+            # store and set session context for follow-ups
+            gmem.upsert_node("location", key, value, scope=scope)
+            set_last_fact(session_id, "location", key)
+            return {"reply": f"Got it — your {key} location is {value}."}
 
-    # 3️⃣ Handle location logic
+        if intent["intent"] == "location.query" and scope and key == scope:
+            node = gmem.get_node("location", key, scope=scope)
+            set_last_fact(session_id, "location", key)
+            if key == "home":
+                return {"reply": f"You live in {node['value']}."} if node else {"reply":"I'm not sure where you live."}
+            if key == "current":
+                return {"reply": f"You're currently in {node['value']}."} if node else {"reply":"I'm not sure where you are right now."}
+            if key == "trip":
+                return {"reply": f"Your trip destination is {node['value']}."} if node else {"reply":"I don't have a trip destination yet."}
+
+        # --- Generic facts ---
+        if intent["intent"] == "fact.update" and domain and key and value:
+            gmem.upsert_node(domain, key, value, scope="global")
+            set_last_fact(session_id, domain, key)
+            return {"reply": f"Got it — your {key} is {value}."}
+
+        if intent["intent"] == "fact.query" and domain and key:
+            node = gmem.get_node(domain, key, scope="global")
+            set_last_fact(session_id, domain, key)
+            if node and node.get("value"):
+                return {"reply": f"Your {key} is {node['value']}."}
+            return {"reply": f"I’m not sure about your {key}. Tell me and I’ll remember it."}
+
+        if intent["intent"] == "fact.delete" and domain and key:
+            # delete across all scopes for robustness in 2.8.x
+            for sc in gmem.get_all_scopes_for_domain(domain):
+                gmem.delete_node(domain, key, sc)
+            set_last_fact(session_id, domain, key)
+            return {"reply": f"Got it — I’ve forgotten your {key}."}
+    except Exception as e:
+        print("[SemanticMemoryError]", e)
+
+    # 4) Fallback to legacy helpers for broader regex support (keeps existing features intact)
+    #    These also end up updating session context.
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
+            # set session context heuristically (trip = default for location queries)
+            set_last_fact(session_id, "location", "trip")
             return {"reply": confirm}
         maybe_loc = gmem.answer_location_question(text)
         if maybe_loc:
-            # We track a consistent location key when answering
-            _last_question["domain"], _last_question["key"] = "location", "trip"
+            set_last_fact(session_id, "location", "trip")
             return {"reply": maybe_loc}
-    except Exception as e:
-        print("[GraphLocationError]", e)
 
-    # 3.5️⃣ Always check for correction / change phrases first
-    try:
-        if re.search(r"(changed my mind|actually[,.\s]*it'?s|no[,.\s]*it'?s)", text.lower()):
-            if _last_question["domain"] and _last_question["key"]:
-                cleaned = re.sub(r"(?i)(?:i\s+changed\s+my\s+mind|actually|no)[^a-z']*it'?s", "", text).strip()
-                cleaned = sanitize_value(cleaned)
-                key = gmem.canonicalize_key(_last_question["key"])
-                text_explicit = f"my {key} is {cleaned}"
-                correction = gmem.extract_and_save_fact(text_explicit)
-            else:
-                correction = gmem.extract_and_save_fact(text)
-            if correction:
-                return {"reply": correction}
-    except Exception as e:
-        print("[GraphChangeError]", e)
-
-    # 4️⃣ Handle fact declarations / queries via graph
-    try:
-        # Declarative pattern match (regex first)
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
-            try:
-                m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
-                if m:
-                    key_raw = m.group(1).strip().lower()
-                    _last_question["key"] = gmem.canonicalize_key(key_raw)
-                    _last_question["domain"] = gmem.detect_domain_from_key(_last_question["key"])
-            except Exception:
-                pass
+            # best effort: infer from sentence
+            m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
+            if m:
+                k = gmem.canonicalize_key(m.group(1))
+                set_last_fact(session_id, gmem.detect_domain_from_key(k), k)
             return {"reply": g_fact_confirm}
-
-        # Semantic declaration
-        if (
-            semantic["type"] == "fact.declaration"
-            and semantic.get("key")
-            and semantic.get("value")
-        ):
-            key_canon = gmem.canonicalize_key(semantic["key"])
-            domain = gmem.detect_domain_from_key(key_canon)
-            value = sanitize_value(semantic["value"])
-            gmem.upsert_node(domain, key_canon, value, scope="global")
-            _last_question["domain"], _last_question["key"] = domain, key_canon
-            print(f"[Graph] Upserted: {domain}.{key_canon} = {value}")
-            return {"reply": f"Got it — your {key_canon} is {value}."}
-
-        # Queries
-        if semantic["type"] == "fact.query" and semantic.get("key"):
-            key_canon = gmem.canonicalize_key(semantic["key"])
-            domain = gmem.detect_domain_from_key(key_canon)
-            node = gmem.get_node(domain, key_canon, scope="global")
-            # ✅ remember last question before returning
-            _last_question["domain"], _last_question["key"] = domain, key_canon
-            if node and node.get("value"):
-                return {"reply": f"Your {key_canon} is {node['value']}."}
-            return {
-                "reply": f"I’m not sure about your {key_canon}. Tell me and I’ll remember it."
-            }
     except Exception as e:
-        print("[GraphFactError]", e)
+        print("[LegacyPathError]", e)
 
-    # 5️⃣ Router or fallback to brain
+    # 5) If we reach here, route to plugins or brain
     try:
         router_output = route(text)
     except Exception as e:
@@ -228,7 +206,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
     if not actions:
-        context = build_context_with_retrieval(text)
+        context = _inject_context_messages(text)
         try:
             reply = brain_chat(text, context=context)
         except Exception as e:
@@ -244,7 +222,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # 6️⃣ Plugin dispatch
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -266,7 +243,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
         summary = result.get("summary") or ""
         if len(summary.strip()) < 40:
-            context = build_context_with_retrieval(text)
+            context = _inject_context_messages(text)
             try:
                 reply = brain_chat(
                     f"{text}\n\nPlugin output:\n{summary}\n\nRespond conversationally.",
@@ -279,13 +256,3 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[PluginError]", e)
         return {"reply": f"Plugin error ({plugin}): {e}"}
-
-
-@app.get("/health", include_in_schema=False)
-def health():
-    return JSONResponse({"status": "ok"})
-
-
-@app.on_event("startup")
-def startup_message() -> None:
-    print("✅ Cortex API started — Phase 2.8.1 Final with canonicalized keys + context-aware corrections.")
