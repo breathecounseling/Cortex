@@ -1,4 +1,3 @@
-# executor/utils/memory_graph.py
 from __future__ import annotations
 import sqlite3, time, json, re, os
 from pathlib import Path
@@ -6,7 +5,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from executor.utils.sanitizer import sanitize_value
 
 # ---------------------------------------------------------------------
-# DATABASE INITIALIZATION
+# DB INIT
 # ---------------------------------------------------------------------
 DB_PATH = Path("/data") / "memory.db"
 os.makedirs(DB_PATH.parent, exist_ok=True)
@@ -62,7 +61,6 @@ def _row_to_node(row: Tuple) -> Dict[str, Any]:
 # ---------------------------------------------------------------------
 def upsert_node(domain: str, key: str, value: str, scope: str = "global",
                 meta: Optional[Dict[str, Any]] = None) -> int:
-    """Insert or overwrite node by (domain,key,scope)."""
     init_graph()
     conn = _connect(); c = conn.cursor()
     ts = _now()
@@ -74,6 +72,7 @@ def upsert_node(domain: str, key: str, value: str, scope: str = "global",
               (domain, key, scope, value.strip(), meta_json, ts, ts))
     nid = c.lastrowid
     conn.commit(); conn.close()
+    _cache_recent(domain, key)
     print(f"[Graph] Upsert node: ({domain}.{key}.{scope}) = {value}")
     return int(nid)
 
@@ -98,6 +97,24 @@ def delete_node(domain: str, key: str, scope: str = "global") -> bool:
     return changed
 
 # ---------------------------------------------------------------------
+# SIMPLE CACHE OF LAST DOMAIN/KEY
+# ---------------------------------------------------------------------
+_CACHE_FILE = Path("/tmp/_cortex_recent_domain.json")
+
+def _cache_recent(domain: str, key: str) -> None:
+    try:
+        _CACHE_FILE.write_text(json.dumps({"domain": domain, "key": key}))
+    except Exception:
+        pass
+
+def _load_recent() -> Tuple[str, str]:
+    try:
+        data = json.loads(_CACHE_FILE.read_text())
+        return data.get("domain", "color"), data.get("key", "favorite color")
+    except Exception:
+        return ("color", "favorite color")
+
+# ---------------------------------------------------------------------
 # 2.8.1 PATCH — SCOPE-AWARE FORGET + IMPLICIT CHANGE
 # ---------------------------------------------------------------------
 _DOMAIN_SCOPES = {
@@ -120,22 +137,17 @@ def infer_location_key_and_scope(text: str) -> (Optional[str], Optional[str]):
     return (None, None)
 
 def detect_implicit_change(text: str) -> Optional[Dict[str, str]]:
-    """Detect phrasing that implies overwriting an existing fact and extract value if possible."""
     t = text.lower().strip()
-    # moved / relocated → home
     m = re.search(r"\b(?:moved|relocated)\s+to\s+(?P<city>[\w\s,]+)", t)
     if m:
         city = sanitize_value(m.group("city"))
         return {"domain": "location", "key": "home", "scope": "home", "value": city}
-    # new home without explicit 'to'
     if re.search(r"\bnew home\b", t):
         return {"domain": "location", "key": "home", "scope": "home"}
-    # "I'm in ..." → current
     m = re.search(r"\bi['’]?m\s+in\s+(?P<city>[\w\s,]+)", t)
     if m:
         city = sanitize_value(m.group("city"))
         return {"domain": "location", "key": "current", "scope": "current", "value": city}
-    # "going / heading / trip to ..." → trip
     m = re.search(r"\b(?:going|heading|trip)\s+to\s+(?P<city>[\w\s,]+)", t)
     if m:
         city = sanitize_value(m.group("city"))
@@ -143,19 +155,18 @@ def detect_implicit_change(text: str) -> Optional[Dict[str, str]]:
     return None
 
 def forget_fact_or_location(text: str) -> Optional[str]:
-    """Scope-aware forget / correction across all domains."""
     t = (text or "").lower().strip()
     m = _CHANGE_RX.search(t)
     if m:
         key = (m.groupdict().get("key") or "").strip().lower()
         val = (m.groupdict().get("val") or "").strip()
-        dom = detect_domain_from_key(key or "color")
+        dom = detect_domain_from_key(key or _load_recent()[0])
         scopes = get_all_scopes_for_domain(dom)
         for scope in scopes:
-            delete_node(dom, key or "favorite color", scope)
+            delete_node(dom, key or _load_recent()[1], scope)
         if val:
-            upsert_node(dom, key or "favorite color", sanitize_value(val), scope=scopes[0])
-            return f"Got it — your {key or 'favorite color'} is {val}."
+            upsert_node(dom, key or _load_recent()[1], sanitize_value(val), scope=scopes[0])
+            return f"Got it — your {key or _load_recent()[1]} is {val}."
         return f"Got it — I've updated your {key or 'fact'}."
 
     if "forget" in t:
@@ -165,10 +176,9 @@ def forget_fact_or_location(text: str) -> Optional[str]:
             if key:
                 delete_node(dom, key, scope)
                 return f"Got it — I've forgotten your {key} location."
-            else:
-                for scope in get_all_scopes_for_domain(dom):
-                    delete_node(dom, "*", scope)
-                return "Got it — I've cleared your saved locations."
+            for scope in get_all_scopes_for_domain(dom):
+                delete_node(dom, "*", scope)
+            return "Got it — I've cleared your saved locations."
         key = re.sub(r"forget\s+(my|the)\s+", "", t).strip()
         dom = detect_domain_from_key(key)
         for scope in get_all_scopes_for_domain(dom):
@@ -196,7 +206,6 @@ _LOC_CURR_RX = re.compile(r"\b(i'?m\s+(in|at|staying\s+in|visiting)|i\s+am\s+(in
 _LOC_TRIP_RX = re.compile(r"\b(i'?m\s+planning\s+(a\s+)?trip\s+to|i\s+plan\s+to\s+go\s+to|i'?m\s+going\s+to)\s+(?P<city>[\w\s,]+)", re.I)
 
 def extract_and_save_location(text: str) -> Optional[str]:
-    """Location extractor with implicit change + sanitation."""
     t = (text or "").strip()
     change = detect_implicit_change(t)
     if change:
@@ -240,7 +249,6 @@ def answer_location_question(text: str) -> Optional[str]:
 # FACT / COLOR / FOOD / MISC
 # ---------------------------------------------------------------------
 _FACT_DECL_RX = re.compile(r"\bmy\s+(?P<key>[\w\s]+?)\s+(?:is|was|=|'s)\s+(?P<val>[^.?!]+)", re.I)
-# Extended change regex supports commas, periods, optional key/value
 _CHANGE_RX = re.compile(
     r"(?:i\s+changed\s+my\s+mind[,.]?(?:\s*(?:about|on)?\s+(?P<key>[\w\s]+))?"
     r"|no[,.\s]*it'?s|actually[,.\s]*it'?s)"
@@ -248,19 +256,8 @@ _CHANGE_RX = re.compile(
     re.I,
 )
 
-def guess_recent_key() -> Tuple[str, str]:
-    """Return (domain,key) of most recently updated fact for fallback."""
-    init_graph()
-    conn = _connect(); c = conn.cursor()
-    c.execute("""SELECT domain,nkey FROM graph_nodes ORDER BY updated_at DESC LIMIT 1""")
-    row = c.fetchone(); conn.close()
-    if row:
-        return row[0], row[1]
-    return ("color", "favorite color")
-
 def extract_and_save_fact(text: str) -> Optional[str]:
     """Detect fact statements and route them to appropriate or new domain."""
-    # Corrections first
     m_change = _CHANGE_RX.search(text or "")
     if m_change:
         key = (m_change.groupdict().get("key") or "").strip().lower()
@@ -268,14 +265,13 @@ def extract_and_save_fact(text: str) -> Optional[str]:
         if key:
             dom = detect_domain_from_key(key)
         else:
-            dom, key = guess_recent_key()
+            dom, key = _load_recent()
         scopes = get_all_scopes_for_domain(dom)
         for scope in scopes:
             delete_node(dom, key, scope)
         upsert_node(dom, key, val, scope=scopes[0])
         return f"Got it — your {key} is {val}."
 
-    # Standard declaration
     m = _FACT_DECL_RX.search(text or "")
     if not m:
         return None
