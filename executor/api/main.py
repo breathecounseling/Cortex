@@ -153,6 +153,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             return {"reply": confirm}
         maybe_loc = gmem.answer_location_question(text)
         if maybe_loc:
+            # We track a consistent location key when answering
             _last_question["domain"], _last_question["key"] = "location", "trip"
             return {"reply": maybe_loc}
     except Exception as e:
@@ -161,9 +162,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # 3.5️⃣ Always check for correction / change phrases first
     try:
         if re.search(r"(changed my mind|actually[,.\s]*it'?s|no[,.\s]*it'?s)", text.lower()):
-            if _last_question["domain"]:
+            if _last_question["domain"] and _last_question["key"]:
                 cleaned = re.sub(r"(?i)(?:i\s+changed\s+my\s+mind|actually|no)[^a-z']*it'?s", "", text).strip()
-                text_explicit = f"my {_last_question['key']} is {cleaned}"
+                cleaned = sanitize_value(cleaned)
+                key = gmem.canonicalize_key(_last_question["key"])
+                text_explicit = f"my {key} is {cleaned}"
                 correction = gmem.extract_and_save_fact(text_explicit)
             else:
                 correction = gmem.extract_and_save_fact(text)
@@ -174,15 +177,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     # 4️⃣ Handle fact declarations / queries via graph
     try:
-        # Declarative pattern match
+        # Declarative pattern match (regex first)
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
             try:
                 m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
                 if m:
-                    key = m.group(1).strip().lower()
-                    _last_question["domain"] = gmem.detect_domain_from_key(key)
-                    _last_question["key"] = key
+                    key_raw = m.group(1).strip().lower()
+                    _last_question["key"] = gmem.canonicalize_key(key_raw)
+                    _last_question["domain"] = gmem.detect_domain_from_key(_last_question["key"])
             except Exception:
                 pass
             return {"reply": g_fact_confirm}
@@ -193,23 +196,25 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             and semantic.get("key")
             and semantic.get("value")
         ):
-            domain = gmem.detect_domain_from_key(semantic["key"])
+            key_canon = gmem.canonicalize_key(semantic["key"])
+            domain = gmem.detect_domain_from_key(key_canon)
             value = sanitize_value(semantic["value"])
-            gmem.upsert_node(domain, semantic["key"], value, scope="global")
-            _last_question["domain"], _last_question["key"] = domain, semantic["key"]
-            print(f"[Graph] Upserted: {domain}.{semantic['key']} = {value}")
-            return {"reply": f"Got it — your {semantic['key']} is {value}."}
+            gmem.upsert_node(domain, key_canon, value, scope="global")
+            _last_question["domain"], _last_question["key"] = domain, key_canon
+            print(f"[Graph] Upserted: {domain}.{key_canon} = {value}")
+            return {"reply": f"Got it — your {key_canon} is {value}."}
 
         # Queries
         if semantic["type"] == "fact.query" and semantic.get("key"):
-            domain = gmem.detect_domain_from_key(semantic["key"])
-            node = gmem.get_node(domain, semantic["key"], scope="global")
+            key_canon = gmem.canonicalize_key(semantic["key"])
+            domain = gmem.detect_domain_from_key(key_canon)
+            node = gmem.get_node(domain, key_canon, scope="global")
             # ✅ remember last question before returning
-            _last_question["domain"], _last_question["key"] = domain, semantic["key"]
+            _last_question["domain"], _last_question["key"] = domain, key_canon
             if node and node.get("value"):
-                return {"reply": f"Your {semantic['key']} is {node['value']}."}
+                return {"reply": f"Your {key_canon} is {node['value']}."}
             return {
-                "reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."
+                "reply": f"I’m not sure about your {key_canon}. Tell me and I’ll remember it."
             }
     except Exception as e:
         print("[GraphFactError]", e)
@@ -283,4 +288,4 @@ def health():
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Cortex API started — Phase 2.8.1 Final with context-tracking corrections.")
+    print("✅ Cortex API started — Phase 2.8.1 Final with canonicalized keys + context-aware corrections.")
