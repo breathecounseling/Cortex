@@ -1,13 +1,15 @@
+# executor/api/main.py
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
 from typing import Any, Dict
-from executor.utils.sanitizer import sanitize_value
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# Sanitizer
+from executor.utils.sanitizer import sanitize_value
 
 # Core router + plugins
 from executor.core.router import route
@@ -27,7 +29,7 @@ from executor.utils.memory import (
     update_or_delete_from_text,
 )
 
-# Vector memory (safe to keep on; summarization optional)
+# Vector memory
 from executor.utils.vector_memory import (
     store_vector,
     summarize_if_needed,
@@ -35,9 +37,13 @@ from executor.utils.vector_memory import (
     hierarchical_recall,
 )
 
-# 🌐 Graph Memory (locations + general facts)
+# 🌐 Graph memory
 from executor.utils import memory_graph as gmem
 
+
+# ------------------------------------------------------------
+# FastAPI setup
+# ------------------------------------------------------------
 app = FastAPI()
 
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -64,18 +70,17 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
         print("[ContextRecallError]", e)
         context = []
 
-    # Facts (inject for persistent memory)
+    # Facts
     try:
         facts = list_facts()
         if facts:
             context.insert(
-                0,
-                {"role": "system", "content": f"Known facts: {json.dumps(facts)}"},
+                0, {"role": "system", "content": f"Known facts: {json.dumps(facts)}"}
             )
     except Exception as e:
         print("[InjectFactsError]", e)
 
-    # Summaries + long-term recall
+    # Summaries
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
@@ -83,6 +88,7 @@ def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
     except Exception as e:
         print("[VectorSummaryError]", e)
 
+    # Hierarchical recall
     try:
         refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if refs:
@@ -109,7 +115,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception:
         raw = {}
     text = (
-        body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or ""
+        body.text
+        or raw.get("message")
+        or raw.get("prompt")
+        or raw.get("content")
+        or ""
     ).strip()
     if not text:
         return {"reply": "How can I help?"}
@@ -117,11 +127,12 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # 1️⃣ Semantic classification
     from executor.core.language_intent import classify_language_intent
     from executor.core.intent_facts import detect_fact_or_question
+
     lang_type = classify_language_intent(text)
     semantic = detect_fact_or_question(text)
     print(f"[LangIntent] {lang_type} :: {text}")
 
-    # 2️⃣ Handle forget/correction
+    # 2️⃣ Handle forget / correction
     try:
         g_forget = gmem.forget_fact_or_location(text)
         if g_forget:
@@ -140,15 +151,28 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[GraphLocationError]", e)
 
+    # 3.5️⃣ Always check for correction / change phrases first
+    try:
+        if re.search(r"(changed my mind|actually[,.\s]*it'?s|no[,.\s]*it'?s)", text.lower()):
+            correction = gmem.extract_and_save_fact(text)
+            if correction:
+                return {"reply": correction}
+    except Exception as e:
+        print("[GraphChangeError]", e)
+
     # 4️⃣ Handle fact declarations / queries via graph
     try:
-        # Declarative (regex-level)
+        # Declarative pattern match
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
             return {"reply": g_fact_confirm}
 
-        # Semantic declaration (LLM-level)
-        if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
+        # Semantic declaration
+        if (
+            semantic["type"] == "fact.declaration"
+            and semantic.get("key")
+            and semantic.get("value")
+        ):
             domain = gmem.detect_domain_from_key(semantic["key"])
             value = sanitize_value(semantic["value"])
             gmem.upsert_node(domain, semantic["key"], value, scope="global")
@@ -161,11 +185,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             node = gmem.get_node(domain, semantic["key"], scope="global")
             if node and node.get("value"):
                 return {"reply": f"Your {semantic['key']} is {node['value']}."}
-            return {"reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."}
+            return {
+                "reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."
+            }
     except Exception as e:
         print("[GraphFactError]", e)
 
-    # 5️⃣ Route via router or fall back to brain
+    # 5️⃣ Router or fallback to brain
     try:
         router_output = route(text)
     except Exception as e:
@@ -234,4 +260,4 @@ def health():
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Cortex API started — Phase 2.8 semantic baseline with scoped context.")
+    print("✅ Cortex API started — Phase 2.8.1 with correction intent hook.")
