@@ -1,96 +1,98 @@
-"""
-executor/core/context_reasoner.py
----------------------------------
-Context Reasoner — short-term conversational reasoning engine for Echo.
-
-Purpose:
-    • Interpret user intent in the context of recent conversation.
-    • Detect implicit corrections, follow-ups, and topic continuity.
-    • Merge short-term (turn) memory + long-term (graph) memory into reasoning context.
-"""
-
+# executor/core/context_reasoner.py
 from __future__ import annotations
-import time, re, json
+import re, json
 from typing import Dict, Any, Optional, List
 
-from executor.utils.turn_memory import get_recent_turns, get_recent_context_text
+from executor.utils.turn_memory import get_recent_turns
 from executor.utils.session_context import get_last_fact
-from executor.utils import memory_graph as gmem
+from executor.utils.memory_graph import (
+    detect_domain_from_key,
+    contains_negation,
+    extract_topic_intro,
+)
 
+SHORT_REPLY_WORDS = 3
+RECENT_QUERY_WINDOW = 3   # require a recent fact.query before treating short reply as correction
+SMALLTALK_COOLDOWN = 5    # after 5 smalltalk turns, stop echoing last fact
+
+def _recent_intents(turns: List[Dict[str, str]]) -> List[str]:
+    intents = []
+    for t in turns:
+        # store light-weight intent markers an upper layer might include in meta later
+        # for now, we derive nothing; placeholder for 2.10
+        pass
+    return intents
 
 def reason_about_context(intent: Dict[str, Any], text: str, session_id: str = "default") -> Dict[str, Any]:
-    """
-    Given a semantic intent and the raw text, adjust it based on conversation context.
-    Returns a possibly modified intent dict.
-    """
-    updated_intent = intent.copy()
+    updated = intent.copy()
     turns = get_recent_turns(session_id=session_id)
     last_dom, last_key = get_last_fact(session_id)
 
-    # --- 1️⃣  Implicit correction: short replies after a query ---
-    if updated_intent["intent"] in ("smalltalk", "other") and len(text.split()) <= 3:
+    # 1) Topic intro: reset continuity
+    topic = extract_topic_intro(text)
+    if topic:
+        updated["intent"] = "smalltalk"
+        updated["__reset_context"] = True
+        return updated
+
+    # 2) Negation handling: erase or replace (no "not X" writes)
+    if updated.get("intent") == "fact.update" and contains_negation(text):
+        # Try to extract a replacement after "not X — Y" or "not X, Y"
+        m = re.search(r"\bnot\b[^A-Za-z0-9]+(?P<alt>[\w\s]+)$", text.strip(), re.I)
+        if last_dom and last_key and m and m.group("alt").strip():
+            updated["domain"] = last_dom
+            updated["key"] = last_key
+            updated["value"] = m.group("alt").strip()
+            updated["confidence"] = 0.95
+            return updated
+        # otherwise: delete the last fact and ask for clarification
         if last_dom and last_key:
-            print(f"[ContextReasoner] Reinterpreting short reply as correction for {last_dom}.{last_key}")
-            updated_intent["intent"] = "fact.update"
-            updated_intent["domain"] = last_dom
-            updated_intent["key"] = last_key
-            updated_intent["value"] = text.strip(" .!?")
-            updated_intent["confidence"] = 0.95
-            return updated_intent
+            updated["intent"] = "fact.delete"
+            updated["domain"] = last_dom
+            updated["key"] = last_key
+            updated["value"] = None
+            updated["confidence"] = 0.95
+            return updated
 
-    # --- 2️⃣  Location follow-up detection ---
-    if updated_intent["intent"] == "location.update" and not updated_intent.get("scope"):
-        # Determine if this is "home" or "current" based on last question
-        if turns and any("where do i live" in t["content"].lower() for t in turns[-3:]):
-            updated_intent["scope"] = "home"
-            updated_intent["key"] = "home"
-        elif turns and any("where am i" in t["content"].lower() for t in turns[-3:]):
-            updated_intent["scope"] = "current"
-            updated_intent["key"] = "current"
+    # 3) Short-reply correction (guarded): only if a recent fact.query occurred
+    if updated.get("intent") in ("smalltalk", "other") and len(text.split()) <= SHORT_REPLY_WORDS:
+        # scan the last few turns for an explicit question pattern in user messages
+        recent_user_texts = [t["content"].lower() for t in turns[-RECENT_QUERY_WINDOW:] if t["role"] == "user"]
+        if any(("what's my" in u or "what is my" in u) for u in recent_user_texts) and last_dom and last_key:
+            updated["intent"] = "fact.update"
+            updated["domain"] = last_dom
+            updated["key"] = last_key
+            updated["value"] = text.strip(" .!?")
+            updated["confidence"] = 0.95
+            return updated
 
-    # --- 3️⃣  Confidence recovery ---
-    if updated_intent.get("confidence", 1.0) < 0.8 and updated_intent.get("key"):
-        dom_guess = updated_intent.get("domain") or gmem.detect_domain_from_key(updated_intent["key"])
-        node = gmem.get_node(dom_guess, updated_intent["key"])
-        if node and node.get("value"):
-            print(f"[ContextReasoner] Low confidence revalidated from graph ({dom_guess}.{updated_intent['key']})")
-            updated_intent["domain"] = dom_guess
-            updated_intent["intent"] = "fact.query"
-            updated_intent["confidence"] = 0.95
+    # 4) Cooldown: if we see a stream of smalltalk, don't keep echoing facts
+    if updated.get("intent") == "smalltalk":
+        # mark to suppress fact echo downstream (main will just go to router/LLM)
+        updated["__suppress_fact_echo"] = True
 
-    # --- 4️⃣  Topic continuity check ---
-    if turns:
-        recent_text = " ".join(t["content"].lower() for t in turns[-5:])
-        if updated_intent["intent"] == "smalltalk":
-            if any(kw in recent_text for kw in ["color", "food", "home", "trip", "project", "idea"]):
-                # maintain continuity with last relevant topic
-                if last_dom and last_key:
-                    updated_intent["intent"] = "fact.query"
-                    updated_intent["domain"] = last_dom
-                    updated_intent["key"] = last_key
-                    updated_intent["confidence"] = 0.9
+    # 5) Confidence recovery: if low confidence but key present, prefer graph lookup
+    if updated.get("confidence", 1.0) < 0.8 and updated.get("key"):
+        dom_guess = updated.get("domain") or detect_domain_from_key(updated["key"])
+        updated["domain"] = dom_guess
+        updated["intent"] = "fact.query"
+        updated["confidence"] = 0.9
 
-    return updated_intent
-
+    return updated
 
 def build_context_block(query: str, session_id: str = "default") -> str:
-    """
-    Compose a full context block (recent turns + relevant facts)
-    for inclusion in GPT-5 prompts.
-    """
-    # short-term recall
-    turn_text = get_recent_context_text(limit=10, session_id=session_id)
+    # kept simple; main already merges additional context
+    from executor.utils.turn_memory import get_recent_context_text
+    from executor.utils import memory_graph as gmem
 
-    # known facts
+    turn_text = get_recent_context_text(limit=10, session_id=session_id)
     try:
         facts = gmem.list_facts()
         fact_text = json.dumps(facts)
     except Exception:
         fact_text = "{}"
-
-    context_block = (
+    return (
         f"Recent conversation:\n{turn_text}\n\n"
         f"Known user facts: {fact_text}\n\n"
         f"Current query: {query.strip()}"
     )
-    return context_block
