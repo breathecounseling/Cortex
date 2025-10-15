@@ -179,7 +179,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, key)
             return {"reply": f"Got it — your {key} is {value}."}
 
-        if intent["intent"] == "fact.query" and domain and key:
+        if intent["intent"].startswith("fact.query") and key:
+    # Always infer domain if missing
+    if not domain:
+        domain = gmem.detect_domain_from_key(key)
+    node = gmem.get_node(domain, key, scope="global")
+    set_last_fact(session_id, domain, key)
+    if node and node.get("value"):
+        return {"reply": f"Your {key} is {node['value']}."}
+    return {"reply": f"I’m not sure about your {key}. Tell me and I’ll remember it."}
             node = gmem.get_node(domain, key, scope="global")
             set_last_fact(session_id, domain, key)
             if node and node.get("value"):
