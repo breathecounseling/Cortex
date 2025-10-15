@@ -109,6 +109,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     session_id = _session_id(request, body)
 
+    # ------------------------------------------------------------
+    # Session-ID command or greeting
+    if text.lower() in {"session id", "what is my session id", "show session id"}:
+        return {"reply": f"Your current session ID is {session_id}."}
+
+    if re.match(r"^(hi|hello|hey)[!. ]*$", text.lower()):
+        return {"reply": f"Hi! I’m Echo. I'm here to make your life easier.\nYour current session ID is {session_id}."}
+
+    # ------------------------------------------------------------
     # 1️⃣ Semantic intent analysis
     intent = analyze_intent(text)
     print(f"[SemanticIntent] {intent}")
@@ -134,7 +143,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # ------------------------------------------------------------
     # 3️⃣ Execute memory actions
     try:
-        # --- Location updates/queries (authoritative analyzer paths) ---
+        # --- Location updates/queries ---
         if intent["intent"] == "location.update" and scope and key == scope:
             gmem.upsert_node("location", key, value, scope=scope)
             set_last_fact(session_id, "location", key)
@@ -150,7 +159,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             if key == "trip":
                 return {"reply": f"Your trip destination is {node['value']}."} if node else {"reply":"I don't have a trip destination yet."}
 
-        # --- Location correction fallback (covers 'No, it's ...', 'Actually it's ...') ---
+        # --- Location correction fallback ---
         if intent["intent"] == "fact.update" and value and (not domain or not key):
             last_dom, last_key = get_last_fact(session_id)
             if last_dom == "location" and last_key in ("home", "current", "trip"):
@@ -160,9 +169,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 set_last_fact(session_id, "location", last_key)
                 return {"reply": f"Got it — your {last_key} is {value}."}
 
-        # --- Generic facts (color, food, etc.) ---
+        # --- Generic facts ---
         if intent["intent"] == "fact.update" and domain and key and value:
-            # Align location updates to their scopes
             if domain == "location" and key in ("home", "current", "trip"):
                 gmem.delete_node(domain, key, scope=key)
                 gmem.upsert_node(domain, key, value, scope=key)
@@ -187,7 +195,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         print("[SemanticMemoryError]", e)
 
     # ------------------------------------------------------------
-    # 4️⃣ Legacy helper fallback (maintains regex-based behavior)
+    # 4️⃣ Legacy helper fallback
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
@@ -210,7 +218,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         print("[LegacyPathError]", e)
 
     # ------------------------------------------------------------
-    # 5️⃣ Route to router or brain fallback
+    # 5️⃣ Router or brain fallback
     try:
         router_output = route(text)
     except Exception as e:
@@ -271,4 +279,4 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Echo API started — Phase 2.8.2 final (location corrections scoped).")
+    print("✅ Echo API started — Phase 2.8.2 final (session ID reporting).")
