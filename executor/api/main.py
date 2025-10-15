@@ -1,4 +1,3 @@
-# executor/api/main.py
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -8,43 +7,62 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Sanitizer + Graph
-from executor.utils.sanitizer import sanitize_value
-from executor.utils import memory_graph as gmem
+# ------------------------------------------------------------
+# Sanitizer  (robust filler trimming)
+# ------------------------------------------------------------
+def sanitize_value(value: str | None) -> str | None:
+    """Cleans trailing filler words like 'now', 'right now', etc."""
+    if not value:
+        return value
 
-# Unified semantic intent + persistent session context
+    value = value.strip().rstrip(".!?")
+    words = value.split()
+    if not words:
+        return value
+
+    fillers = {
+        "now", "currently", "instead", "today", "tonight",
+        "right now", "at the moment", "right", "momentarily",
+        "for now", "as of now", "at present"
+    }
+
+    last_two = " ".join(words[-2:]).lower() if len(words) >= 2 else ""
+    last_one = words[-1].lower()
+
+    if last_two in fillers:
+        words = words[:-2]
+    elif last_one in fillers:
+        words = words[:-1]
+
+    cleaned = " ".join(words).strip()
+    return cleaned
+
+
+# ------------------------------------------------------------
+# Core imports
+# ------------------------------------------------------------
+from executor.utils import memory_graph as gmem
 from executor.core.semantic_intent import analyze as analyze_intent
 from executor.utils.session_context import set_last_fact, get_last_fact
-
-# Router + plugins + brain + classic memory/vector (unchanged integrations)
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
-
 from executor.ai.router import chat as brain_chat
 from executor.utils.memory import (
-    init_db_if_needed,
-    recall_context,
-    remember_exchange,
-    save_fact,
-    list_facts,
-    update_or_delete_from_text,
+    init_db_if_needed, recall_context, remember_exchange,
+    save_fact, list_facts, update_or_delete_from_text
 )
-
 from executor.utils.vector_memory import (
-    store_vector,
-    summarize_if_needed,
-    retrieve_topic_summaries,
-    hierarchical_recall,
+    store_vector, summarize_if_needed,
+    retrieve_topic_summaries, hierarchical_recall
 )
 
 # ------------------------------------------------------------
 # FastAPI setup
 # ------------------------------------------------------------
 app = FastAPI()
-
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
@@ -54,10 +72,9 @@ class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
     system: str | None = None
-    session_id: str | None = None  # optional caller-provided session id
+    session_id: str | None = None
 
 
-# ------------------------------------------------------------
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
 
@@ -109,27 +126,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         raw = await request.json()
     except Exception:
         raw = {}
-    text = (
-        body.text
-        or raw.get("message")
-        or raw.get("prompt")
-        or raw.get("content")
-        or ""
-    ).strip()
+    text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
     if not text:
         return {"reply": "How can I help?"}
 
     session_id = _session_id(request, body)
-
-    # ------------------------------------------------------------
-    # Session-ID command or greeting
-    if text.lower() in {"session id", "what is my session id", "show session id"}:
-        return {"reply": f"Your current session ID is {session_id}."}
-
-    if re.match(r"^(hi|hello|hey)[!. ]*$", text.lower()):
-        return {
-            "reply": f"Hi! I’m Echo. I'm here to make your life easier.\nYour current session ID is {session_id}."
-        }
 
     # ------------------------------------------------------------
     # 1️⃣ Semantic intent analysis
@@ -171,13 +172,9 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             if key == "home":
                 return {"reply": f"You live in {node['value']}."} if node else {"reply": "I'm not sure where you live."}
             if key == "current":
-                return {
-                    "reply": f"You're currently in {node['value']}."
-                } if node else {"reply": "I'm not sure where you are right now."}
+                return {"reply": f"You're currently in {node['value']}."} if node else {"reply": "I'm not sure where you are right now."}
             if key == "trip":
-                return {
-                    "reply": f"Your trip destination is {node['value']}."
-                } if node else {"reply": "I don't have a trip destination yet."}
+                return {"reply": f"Your trip destination is {node['value']}."} if node else {"reply": "I don't have a trip destination yet."}
 
         # --- Location correction fallback ---
         if intent["intent"] == "fact.update" and value and (not domain or not key):
@@ -189,7 +186,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 set_last_fact(session_id, "location", last_key)
                 return {"reply": f"Got it — your {last_key} is {value}."}
 
-        # --- Generic facts ---
+        # --- Generic fact updates ---
         if intent["intent"] == "fact.update" and domain and key and value:
             if domain == "location" and key in ("home", "current", "trip"):
                 gmem.delete_node(domain, key, scope=key)
@@ -199,7 +196,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, key)
             return {"reply": f"Got it — your {key} is {value}."}
 
-        # --- Fact queries (with forced domain detection) ---
+        # --- Fact queries (forced domain detection) ---
         if intent["intent"].startswith("fact.query") and key:
             if not domain:
                 domain = gmem.detect_domain_from_key(key)
@@ -267,7 +264,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # Plugin dispatch
+    # ------------------------------------------------------------
+    # 6️⃣ Plugin dispatch
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -282,10 +280,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         elif plugin == "feedback":
             result = feedback.handle(args)
         else:
-            result = {
-                "status": "ok",
-                "summary": router_output.get("assistant_message", "Okay."),
-            }
+            result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
         summary = result.get("summary") or ""
         if len(summary.strip()) < 40:
             context = _inject_context_messages(text)
@@ -305,4 +300,4 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Echo API started — Phase 2.8.3 final (query fix + session ID reporting).")
+    print("✅ Echo API started — Phase 2.8.4 (robust sanitizer + query fix).")
