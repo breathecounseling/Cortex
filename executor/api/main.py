@@ -1,4 +1,4 @@
-# executor/api/main.py — Echo 2.9.4 (clause routing, domain guard, negation flow)
+# executor/api/main.py — Echo 2.9.5 (clause pre-split, topic-aware domain)
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from executor.utils.sanitizer import sanitize_value
 from executor.utils import memory_graph as gmem
 from executor.core.semantic_intent import analyze as analyze_intent
-from executor.utils.session_context import set_last_fact, get_last_fact
+from executor.utils.session_context import set_last_fact, get_last_fact, get_topic
 from executor.utils.turn_memory import add_turn
 from executor.core.context_reasoner import reason_about_context, build_context_block
 from executor.core.router import route
@@ -51,6 +51,24 @@ def root() -> Dict[str, Any]:
 def health():
     return JSONResponse({"status": "ok"})
 
+# --- small helper to apply writes for updates (used by clause path)
+def _apply_update(intent: Dict[str, Any], session_id: str) -> Optional[str]:
+    domain = intent.get("domain")
+    key    = gmem.canonicalize_key(intent.get("key")) if intent.get("key") else None
+    scope  = intent.get("scope")
+    value  = sanitize_value(intent.get("value")) if intent.get("value") else None
+    if intent.get("intent") == "location.update" and key in ("home","current","trip") and value:
+        gmem.upsert_node("location", key, value, scope=key)
+        set_last_fact(session_id, "location", key)
+        return f"Got it — your {key} location is {value}."
+    if intent.get("intent") == "fact.update" and domain and key and value:
+        detected = gmem.detect_domain_from_key(key)
+        domain = detected or domain
+        gmem.upsert_node(domain, key, value, scope="global")
+        set_last_fact(session_id, domain, key)
+        return f"Got it — your {key} is {value}."
+    return None
+
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
@@ -64,7 +82,22 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     session_id = _session_id(request, body)
     add_turn("user", text, session_id=session_id)
 
-    # 1) analyze + reason
+    # --- 0) Clause pre-split (2.9.5 bridge): handle multi-intent before main pipeline
+    clauses = gmem.split_clauses(text)
+    if len(clauses) > 1:
+        replies: list[str] = []
+        for clause in clauses:
+            sub_intent = analyze_intent(clause)
+            print(f"[SemanticIntent:Clause] {sub_intent}")
+            sub_intent = reason_about_context(sub_intent, clause, session_id=session_id)
+            # Try to apply writes for sub-intents (location/fact updates)
+            r = _apply_update(sub_intent, session_id)
+            if r:
+                replies.append(r)
+        if replies:
+            return {"reply": " ".join(r for r in replies if r)}
+
+    # --- 1) Semantic intent + context reasoning
     intent = analyze_intent(text)
     print(f"[SemanticIntent] {intent}")
     intent = reason_about_context(intent, text, session_id=session_id)
@@ -76,19 +109,24 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     key = gmem.canonicalize_key(key_raw) if key_raw else None
     value = sanitize_value(value_raw) if value_raw else value_raw
 
-    # 2) defaults / domain inference
+    # --- Topic-aware override: if topic exists and domain is weak/ambiguous
+    topic = get_topic(session_id)
+    if topic and key and (not domain or domain in ("misc", "favorite", "current")):
+        inferred = gmem.detect_domain_from_key(f"{topic} {key}")
+        if inferred:
+            domain = inferred
+
+    # --- 2) Resolve defaults
     if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
         last_dom, last_key = get_last_fact(session_id)
         if not domain: domain = last_dom
-        if not key: key = gmem.canonicalize_key(last_key) if last_key else None
+        if not key:    key    = gmem.canonicalize_key(last_key) if last_key else None
     if intent["intent"].startswith("fact") and not domain and key:
         domain = gmem.detect_domain_from_key(key)
 
     try:
-        # 3) Location (route complex sentences to clause-aware extractor)
+        # --- 3) Location updates/queries
         if intent["intent"] == "location.update" and scope and key == scope:
-            # If analyzer didn't give a clean value or it's a multi-clause message,
-            # let the clause-aware extractor handle it end-to-end.
             if (not value) or re.search(r"\b(but|and|then)\b", text, re.I):
                 confirm = gmem.extract_and_save_location(text)
                 if confirm:
@@ -116,12 +154,12 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             add_turn("assistant", msg, session_id)
             return {"reply": msg}
 
-        # 4) Generic facts: enforce domain from key at write time
+        # --- 4) Generic facts
         if intent["intent"] == "fact.update" and domain and key and value:
             detected = gmem.detect_domain_from_key(key)
             if detected and detected != domain:
                 domain = detected
-            if domain == "location" and key in ("home", "current", "trip"):
+            if domain == "location" and key in ("home","current","trip"):
                 gmem.delete_node(domain, key, scope=key)
                 gmem.upsert_node(domain, key, value, scope=key)
             else:
@@ -153,7 +191,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[SemanticMemoryError]", e)
 
-    # 5) Legacy helper fallback
+    # --- 5) Legacy helper fallback
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
@@ -178,7 +216,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[LegacyPathError]", e)
 
-    # 6) Router or brain fallback
+    # --- 6) Router or brain fallback
     try:
         router_output = route(text)
     except Exception as e:
@@ -204,7 +242,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # 7) Plugin dispatch
+    # --- 7) Plugin dispatch
     action = actions[0]; plugin = action.get("plugin"); args = action.get("args", {})
     try:
         if plugin == "web_search":
@@ -237,4 +275,4 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Echo API started — Phase 2.9.4 (clause routing, negation, domain guard).")
+    print("✅ Echo API started — Phase 2.9.5 (clause pre-split + topic-aware domain).")
