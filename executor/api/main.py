@@ -90,7 +90,7 @@ def _inject_context_messages(query: str) -> list[dict[str,str]]:
 # ------------------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"status": "ok", "message": "Cortex API is running."}
+    return {"status": "ok", "message": "Echo API is running."}
 
 @app.get("/health", include_in_schema=False)
 def health():
@@ -114,7 +114,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     print(f"[SemanticIntent] {intent}")
 
     # 2) Resolve domain/key/value with persistence + canonicalization
-    #    - If analyzer omitted domain/key in corrections, use persistent last fact
     domain: Optional[str] = intent.get("domain")
     key_raw: Optional[str] = intent.get("key")
     value_raw: Optional[str] = intent.get("value")
@@ -122,21 +121,19 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     key = gmem.canonicalize_key(key_raw) if key_raw else None
     value = sanitize_value(value_raw) if value_raw else value_raw
 
+    # Load session context if needed
     if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
-        # Try session context
         last_dom, last_key = get_last_fact(session_id)
         if not domain: domain = last_dom
         if not key: key = gmem.canonicalize_key(last_key) if last_key else None
 
-    # Infer domain from key if still missing (color/food/location/misc)
     if (intent["intent"].startswith("fact") and not domain and key):
         domain = gmem.detect_domain_from_key(key)
 
     # 3) Execute memory action
     try:
-        # --- Location updates/queries (authoritative via analyzer) ---
+        # --- Location updates/queries (authoritative) ---
         if intent["intent"] == "location.update" and scope and key == scope:
-            # store and set session context for follow-ups
             gmem.upsert_node("location", key, value, scope=scope)
             set_last_fact(session_id, "location", key)
             return {"reply": f"Got it — your {key} location is {value}."}
@@ -150,6 +147,16 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 return {"reply": f"You're currently in {node['value']}."} if node else {"reply":"I'm not sure where you are right now."}
             if key == "trip":
                 return {"reply": f"Your trip destination is {node['value']}."} if node else {"reply":"I don't have a trip destination yet."}
+
+        # --- PATCH: location-aware correction fallback ---
+        if intent["intent"] == "fact.update" and value and (not domain or not key):
+            last_dom, last_key = get_last_fact(session_id)
+            if last_dom == "location" and last_key in ("home", "current", "trip"):
+                # delete + upsert within same scope
+                gmem.delete_node("location", last_key, scope=last_key)
+                gmem.upsert_node("location", last_key, value, scope=last_key)
+                set_last_fact(session_id, "location", last_key)
+                return {"reply": f"Got it — your {last_key} is {value}."}
 
         # --- Generic facts ---
         if intent["intent"] == "fact.update" and domain and key and value:
@@ -165,7 +172,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             return {"reply": f"I’m not sure about your {key}. Tell me and I’ll remember it."}
 
         if intent["intent"] == "fact.delete" and domain and key:
-            # delete across all scopes for robustness in 2.8.x
             for sc in gmem.get_all_scopes_for_domain(domain):
                 gmem.delete_node(domain, key, sc)
             set_last_fact(session_id, domain, key)
@@ -173,22 +179,18 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[SemanticMemoryError]", e)
 
-    # 4) Fallback to legacy helpers for broader regex support (keeps existing features intact)
-    #    These also end up updating session context.
+    # 4) Fallback to legacy helpers
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
-            # set session context heuristically (trip = default for location queries)
             set_last_fact(session_id, "location", "trip")
             return {"reply": confirm}
         maybe_loc = gmem.answer_location_question(text)
         if maybe_loc:
             set_last_fact(session_id, "location", "trip")
             return {"reply": maybe_loc}
-
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
-            # best effort: infer from sentence
             m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
             if m:
                 k = gmem.canonicalize_key(m.group(1))
@@ -197,7 +199,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[LegacyPathError]", e)
 
-    # 5) If we reach here, route to plugins or brain
+    # 5) Router or fallback to brain
     try:
         router_output = route(text)
     except Exception as e:
@@ -211,7 +213,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             reply = brain_chat(text, context=context)
         except Exception as e:
             reply = f"(brain offline) {e}"
-
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
@@ -240,7 +241,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 "status": "ok",
                 "summary": router_output.get("assistant_message", "Okay."),
             }
-
         summary = result.get("summary") or ""
         if len(summary.strip()) < 40:
             context = _inject_context_messages(text)
@@ -256,3 +256,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[PluginError]", e)
         return {"reply": f"Plugin error ({plugin}): {e}"}
+
+@app.on_event("startup")
+def startup_message() -> None:
+    print("✅ Echo API started — Phase 2.8.2 persistence baseline (scope-aligned corrections).")
