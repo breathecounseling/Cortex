@@ -4,8 +4,6 @@ import sqlite3, time, json, re, os
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
-# Robust value sanitizer (single source of truth)
-# If your sanitizer lives elsewhere, keep this import.
 from executor.utils.sanitizer import sanitize_value
 
 # ---------------------------------------------------------------------
@@ -16,7 +14,14 @@ os.makedirs(DB_PATH.parent, exist_ok=True)
 print(f"[GraphDB] Using database at {DB_PATH}")
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH.as_posix(), check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH.as_posix(), check_same_thread=False)
+    try:
+        # Better concurrency for readers+writes
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
+    return conn
 
 def init_graph() -> None:
     conn = _connect(); c = conn.cursor()
@@ -67,9 +72,23 @@ def canonicalize_key(k: str | None) -> str | None:
     if not k:
         return k
     k = k.strip().lower()
-    # collapse underscores/whitespace
     k = re.sub(r"[\s_]+", " ", k)
     return k.strip()
+
+# ---------------------------------------------------------------------
+# DB LOCK-RESILIENT COMMIT
+# ---------------------------------------------------------------------
+def _safe_commit(conn: sqlite3.Connection, retries: int = 4, delay: float = 0.12) -> None:
+    for _ in range(retries):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower():
+                time.sleep(delay)
+                continue
+            raise
+    raise sqlite3.OperationalError("database is locked (after retries)")
 
 # ---------------------------------------------------------------------
 # CORE CRUD
@@ -86,9 +105,9 @@ def upsert_node(domain: str, key: str, value: str, scope: str = "global",
               (domain, key, scope))
     c.execute("""INSERT INTO graph_nodes(domain,nkey,scope,value,meta,created_at,updated_at)
                  VALUES(?,?,?,?,?,?,?)""",
-              (domain, key, scope, value.strip(), meta_json, ts, ts))
+              (domain, key, scope, (value or "").strip(), meta_json, ts, ts))
     nid = c.lastrowid
-    conn.commit(); conn.close()
+    _safe_commit(conn); conn.close()
     print(f"[Graph] Upsert node: ({domain}.{key}.{scope}) = {value}")
     return int(nid)
 
@@ -109,37 +128,37 @@ def delete_node(domain: str, key: str, scope: str = "global") -> bool:
     c.execute("DELETE FROM graph_nodes WHERE domain=? AND nkey=? AND scope=?",
               (domain, key, scope))
     changed = c.rowcount > 0
-    conn.commit(); conn.close()
+    _safe_commit(conn); conn.close()
     if changed:
         print(f"[Graph] Deleted node: ({domain}.{key}.{scope})")
     return changed
 
 # ---------------------------------------------------------------------
-# 2.9 REGEX ENHANCEMENTS (syntax-level helpers, not semantics)
+# 2.9 REGEX ENHANCEMENTS (syntax helpers)
 # ---------------------------------------------------------------------
-
-# --- Multi-clause splitter: break on coordinating conjunctions between clauses
 _CLAUSE_SPLIT_RX = re.compile(r"\b(?:but|and|then|while)\b", re.I)
-
 def split_clauses(text: str) -> List[str]:
-    """Split input into syntactic clauses for separate analysis."""
     return [t.strip() for t in _CLAUSE_SPLIT_RX.split(text or "") if t.strip()]
 
-# --- Improved location regex (non-greedy, clause-aware) ---
+# Non-greedy + look-ahead so we stop BEFORE “but/and/then/I’m/I am” or end
 _LOC_HOME_RX = re.compile(
-    r"\b(i\s+live\s+in|my\s+home\s+is\s+in)\s+(?P<city>[A-Za-z\s]+?)(?:\s+(?:but|and|then)\b|[.?!]|$)",
+    r"\b(i\s+live\s+in|my\s+home\s+is\s+in)\s+(?P<city>[A-Za-z\s]+?)(?=\s+(?:but|and|then|i'?m\b|i\s+am\b)|[.?!]|$)",
     re.I
 )
 _LOC_CURR_RX = re.compile(
-    r"\b(i'?m\s+(?:in|at|staying\s+in|visiting)|i\s+am\s+(?:in|at))\s+(?P<city>[A-Za-z\s]+?)(?:\s+(?:but|and|then)\b|[.?!]|$)",
+    r"\b(i'?m\s+(?:in|at|staying\s+in|visiting)|i\s+am\s+(?:in|at))\s+(?P<city>[A-Za-z\s]+?)(?=\s+(?:but|and|then|i'?m\b|i\s+am\b)|[.?!]|$)",
+    re.I
+)
+# Adverb-first variant: "I'm currently in Paris"
+_LOC_CURR_RX_ALT = re.compile(
+    r"\b(i'?m|i\s+am)\s+currently\s+(?:in|at|staying\s+in|visiting)\s+(?P<city>[A-Za-z\s]+?)(?=\s+(?:but|and|then|i'?m\b|i\s+am\b)|[.?!]|$)",
     re.I
 )
 _LOC_TRIP_RX = re.compile(
-    r"\b(i'?m\s+(?:planning\s+(?:a\s+)?trip\s+to|going\s+to|heading\s+to)|trip\s+to)\s+(?P<city>[A-Za-z\s]+?)(?:\s+(?:but|and|then)\b|[.?!]|$)",
+    r"\b(i'?m\s+(?:planning\s+(?:a\s+)?trip\s+to|going\s+to|heading\s+to)|trip\s+to)\s+(?P<city>[A-Za-z\s]+?)(?=\s+(?:but|and|then|i'?m\b|i\s+am\b)|[.?!]|$)",
     re.I
 )
 
-# Negation and topic-intro cues (for upper layers to consume)
 _NEGATION_RX = re.compile(r"\b(no|not|never)\b", re.I)
 _TOPIC_INTRO_RX = re.compile(
     r"\b(?:let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\s+(?P<topic>[\w\s]+)",
@@ -154,7 +173,7 @@ def extract_topic_intro(text: str) -> Optional[str]:
     return m.group("topic").strip() if m else None
 
 # ---------------------------------------------------------------------
-# 2.8.1/2.8.4 PATCH — SCOPE-AWARE FORGET + IMPLICIT CHANGE
+# 2.8.x PATCHES — SCOPE-AWARE FORGET + IMPLICIT CHANGE
 # ---------------------------------------------------------------------
 _DOMAIN_SCOPES = {
     "location": ["home", "current", "trip", "global"],
@@ -176,7 +195,6 @@ def infer_location_key_and_scope(text: str) -> (Optional[str], Optional[str]):
     return (None, None)
 
 def detect_implicit_change(text: str) -> Optional[Dict[str, str]]:
-    """Detect phrasing implying overwrite; extract value if possible."""
     t = (text or "").lower().strip()
 
     m = re.search(r"\b(?:moved|relocated)\s+to\s+(?P<city>[\w\s,]+)", t)
@@ -196,7 +214,6 @@ def detect_implicit_change(text: str) -> Optional[Dict[str, str]]:
     if m:
         city = sanitize_value(m.group("city"))
         return {"domain": "location", "key": "trip", "scope": "trip", "value": city}
-
     return None
 
 # ---------------------------------------------------------------------
@@ -208,36 +225,27 @@ def detect_domain_from_key(key: str) -> str:
     if "food" in k or "drink" in k or "meal" in k: return "food"
     if "color" in k or "paint" in k or "shade" in k: return "color"
     if "location" in k or "home" in k or "trip" in k or "city" in k: return "location"
-    # dynamic domain: first token
     dom = re.sub(r"[^a-z0-9_]+", "_", k.split()[0]) if k else "misc"
     print(f"[Graph] Auto-created domain: {dom}")
     return dom or "misc"
 
 # ---------------------------------------------------------------------
-# LOCATION LOGIC (with clause support)
+# LOCATION LOGIC (clause-aware)
 # ---------------------------------------------------------------------
 def extract_and_save_location(text: str) -> Optional[str]:
-    """
-    Clause-aware extractor with implicit change + sanitation.
-    Splits multi-clause inputs and processes each; returns the first match's confirmation.
-    """
     if not text: return None
 
-    # implicit change first (fast path)
     change = detect_implicit_change(text)
-    if change:
-        # enforce same-scope write
-        if "value" in change and change["value"]:
-            upsert_node(change["domain"], change["key"], change["value"], scope=change["scope"])
-            return f"Got it — your {change['key']} location is {change['value']}."
-        # otherwise, let clause regex handle it
+    if change and change.get("value"):
+        upsert_node(change["domain"], change["key"], change["value"], scope=change["scope"])
+        return f"Got it — your {change['key']} location is {change['value']}."
 
-    # process each clause independently
     for clause in split_clauses(text):
         t = clause.strip()
         for rx, (key, scope, msg) in [
             (_LOC_HOME_RX, ("home", "home", "your home location")),
             (_LOC_CURR_RX, ("current", "current", "you're currently in")),
+            (_LOC_CURR_RX_ALT, ("current", "current", "you're currently in")),
             (_LOC_TRIP_RX, ("trip", "trip", "your trip destination")),
         ]:
             m = rx.search(t)
@@ -271,7 +279,6 @@ def answer_location_question(text: str) -> Optional[str]:
 # FACT / COLOR / FOOD / MISC
 # ---------------------------------------------------------------------
 _FACT_DECL_RX = re.compile(r"\bmy\s+(?P<key>[\w\s]+?)\s+(?:is|was|=|'s)\s+(?P<val>[^.?!]+)", re.I)
-# Extended correction regex (commas, periods, optional key/value)
 _CHANGE_RX = re.compile(
     r"(?:i\s+changed\s+my\s+mind[,.]?(?:\s*(?:about|on)?\s+(?P<key>[\w\s]+))?"
     r"|no[,.\s]*it'?s|actually[,.\s]*it'?s)"
@@ -280,13 +287,8 @@ _CHANGE_RX = re.compile(
 )
 
 def extract_and_save_fact(text: str) -> Optional[str]:
-    """
-    Detect single-fact statements or simple corrections and route them.
-    Clause-splitting is left to higher layers; this remains a single-fact handler.
-    """
     if not text: return None
 
-    # Corrections first
     m_change = _CHANGE_RX.search(text)
     if m_change:
         key = canonicalize_key((m_change.groupdict().get("key") or "").strip().lower())
@@ -294,7 +296,6 @@ def extract_and_save_fact(text: str) -> Optional[str]:
         if key:
             dom = detect_domain_from_key(key)
         else:
-            # last-resort: use last known fact if upper layer didn't inject context
             dom, key = _load_recent()
         scopes = get_all_scopes_for_domain(dom)
         for scope in scopes:
@@ -302,19 +303,17 @@ def extract_and_save_fact(text: str) -> Optional[str]:
         upsert_node(dom, key, val, scope=scopes[0])
         return f"Got it — your {key} is {val}."
 
-    # Standard declaration
     m = _FACT_DECL_RX.search(text)
     if not m:
         return None
     key = canonicalize_key(m.group("key").strip().lower())
     val = sanitize_value(m.group("val").strip().rstrip(".!?"))
     dom = detect_domain_from_key(key)
-    scope = "global"
-    upsert_node(dom, key, val, scope=scope)
+    upsert_node(dom, key, val, scope="global")
     return f"Got it — your {key} is {val}."
 
 # ---------------------------------------------------------------------
-# SIMPLE LAST-UPsert CACHE (fallback only; session layer preferred)
+# RECENT-UPSERT FALLBACK (legacy only)
 # ---------------------------------------------------------------------
 _CACHE_FILE = Path("/tmp/_cortex_recent_domain.json")
 
@@ -334,10 +333,9 @@ def _load_recent() -> Tuple[str, str]:
         return ("color", "favorite color")
 
 # ---------------------------------------------------------------------
-# FORGET / CORRECTION (scope-aware)
+# FORGET / CORRECTION
 # ---------------------------------------------------------------------
 def forget_fact_or_location(text: str) -> Optional[str]:
-    """Scope-aware forget / correction across all domains."""
     t = (text or "").lower().strip()
     m = _CHANGE_RX.search(t)
     if m:
@@ -353,7 +351,6 @@ def forget_fact_or_location(text: str) -> Optional[str]:
         return f"Got it — I've updated your {key or 'fact'}."
 
     if "forget" in t:
-        # Location?
         if any(w in t for w in ["trip", "home", "current", "city", "place", "location"]):
             dom = "location"
             key, scope = infer_location_key_and_scope(t)
@@ -364,7 +361,6 @@ def forget_fact_or_location(text: str) -> Optional[str]:
                 delete_node(dom, "*", scope)
             return "Got it — I've cleared your saved locations."
 
-        # Generic forget
         key = canonicalize_key(re.sub(r"forget\s+(my|the)\s+", "", t).strip())
         dom = detect_domain_from_key(key)
         for scope in get_all_scopes_for_domain(dom):
