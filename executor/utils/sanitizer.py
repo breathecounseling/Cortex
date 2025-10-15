@@ -5,7 +5,16 @@ def sanitize_value(value: str) -> str:
     """Trim trailing filler words and punctuation, preserving meaning."""
     if not value:
         return value
-    fillers = {"now", "instead", "currently", "today", "tonight", "at the moment"}
+    fillers = {
+    "now",
+    "instead",
+    "currently",
+    "today",
+    "tonight",
+    "at the moment",
+    "right now",
+    "right"
+}
     words = value.strip().rstrip(".!?").split()
     if words and words[-1].lower() in fillers:
         words = words[:-1]
