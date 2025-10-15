@@ -1,6 +1,4 @@
-"""
-executor/api/main.py — API entrypoint for Echo 2.9.3 stabilization
-"""
+# executor/api/main.py — Echo 2.9.4 (clause routing, domain guard, negation flow)
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -45,16 +43,13 @@ class ChatBody(BaseModel):
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
 
-
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Echo API is running."}
 
-
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
-
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
@@ -69,7 +64,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     session_id = _session_id(request, body)
     add_turn("user", text, session_id=session_id)
 
-    # --- 1️⃣  Semantic intent + context reasoning
+    # 1) analyze + reason
     intent = analyze_intent(text)
     print(f"[SemanticIntent] {intent}")
     intent = reason_about_context(intent, text, session_id=session_id)
@@ -81,20 +76,28 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     key = gmem.canonicalize_key(key_raw) if key_raw else None
     value = sanitize_value(value_raw) if value_raw else value_raw
 
-    # --- 2️⃣  Resolve defaults
+    # 2) defaults / domain inference
     if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
         last_dom, last_key = get_last_fact(session_id)
-        if not domain:
-            domain = last_dom
-        if not key:
-            key = gmem.canonicalize_key(last_key) if last_key else None
+        if not domain: domain = last_dom
+        if not key: key = gmem.canonicalize_key(last_key) if last_key else None
     if intent["intent"].startswith("fact") and not domain and key:
         domain = gmem.detect_domain_from_key(key)
 
     try:
-        # --- 3️⃣  Location updates/queries ---
+        # 3) Location (route complex sentences to clause-aware extractor)
         if intent["intent"] == "location.update" and scope and key == scope:
-            if value:
+            # If analyzer didn't give a clean value or it's a multi-clause message,
+            # let the clause-aware extractor handle it end-to-end.
+            if (not value) or re.search(r"\b(but|and|then)\b", text, re.I):
+                confirm = gmem.extract_and_save_location(text)
+                if confirm:
+                    set_last_fact(session_id, "location", key)
+                    add_turn("assistant", confirm, session_id)
+                    return {"reply": confirm}
+                else:
+                    print("[LocationUpdateWarning] No value extracted; skipping write.")
+            else:
                 gmem.upsert_node("location", key, value, scope=scope)
                 set_last_fact(session_id, "location", key)
                 reply = f"Got it — your {key} location is {value}."
@@ -113,7 +116,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             add_turn("assistant", msg, session_id)
             return {"reply": msg}
 
-        # --- 4️⃣  Generic fact updates / deletes / queries ---
+        # 4) Generic facts: enforce domain from key at write time
         if intent["intent"] == "fact.update" and domain and key and value:
             detected = gmem.detect_domain_from_key(key)
             if detected and detected != domain:
@@ -150,7 +153,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[SemanticMemoryError]", e)
 
-    # --- 5️⃣  Legacy helper fallback ---
+    # 5) Legacy helper fallback
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
@@ -175,7 +178,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[LegacyPathError]", e)
 
-    # --- 6️⃣  Router or brain fallback ---
+    # 6) Router or brain fallback
     try:
         router_output = route(text)
     except Exception as e:
@@ -201,11 +204,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # --- 7️⃣  Plugin dispatch ---
-    action = actions[0]
-    plugin = action.get("plugin")
-    args = action.get("args", {})
-
+    # 7) Plugin dispatch
+    action = actions[0]; plugin = action.get("plugin"); args = action.get("args", {})
     try:
         if plugin == "web_search":
             result = web_search.handle(args)
@@ -235,7 +235,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         print("[PluginError]", e)
         return {"reply": f"Plugin error ({plugin}): {e}"}
 
-
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Echo API started — Phase 2.9.3 stabilization.")
+    print("✅ Echo API started — Phase 2.9.4 (clause routing, negation, domain guard).")
