@@ -1,3 +1,6 @@
+"""
+executor/api/main.py — API entrypoint for Echo 2.9.3 stabilization
+"""
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -7,27 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Robust inline sanitizer (or keep your separate module)
-def sanitize_value(value: str | None) -> str | None:
-    if not value:
-        return value
-    value = value.strip().rstrip(".!?")
-    words = value.split()
-    if not words:
-        return value
-    fillers = {
-        "now", "currently", "instead", "today", "tonight",
-        "right now", "at the moment", "right", "momentarily",
-        "for now", "as of now", "at present"
-    }
-    last_two = " ".join(words[-2:]).lower() if len(words) >= 2 else ""
-    last_one = words[-1].lower()
-    if last_two in fillers:
-        words = words[:-2]
-    elif last_one in fillers:
-        words = words[:-1]
-    return " ".join(words).strip()
-
+from executor.utils.sanitizer import sanitize_value
 from executor.utils import memory_graph as gmem
 from executor.core.semantic_intent import analyze as analyze_intent
 from executor.utils.session_context import set_last_fact, get_last_fact
@@ -62,13 +45,16 @@ class ChatBody(BaseModel):
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
 
+
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Echo API is running."}
 
+
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
+
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
@@ -83,12 +69,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     session_id = _session_id(request, body)
     add_turn("user", text, session_id=session_id)
 
-    # 1) analyze + reason
+    # --- 1️⃣  Semantic intent + context reasoning
     intent = analyze_intent(text)
     print(f"[SemanticIntent] {intent}")
     intent = reason_about_context(intent, text, session_id=session_id)
 
-    # 2) resolve fields
     domain: Optional[str] = intent.get("domain")
     key_raw: Optional[str] = intent.get("key")
     value_raw: Optional[str] = intent.get("value")
@@ -96,45 +81,43 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     key = gmem.canonicalize_key(key_raw) if key_raw else None
     value = sanitize_value(value_raw) if value_raw else value_raw
 
-    # topic intro resets: prevent stale domain echo
-    if intent.get("__reset_context"):
-        # leave last_fact as-is if you prefer; the guard below avoids echo anyway
-        pass
-
+    # --- 2️⃣  Resolve defaults
     if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
         last_dom, last_key = get_last_fact(session_id)
-        if not domain: domain = last_dom
-        if not key: key = gmem.canonicalize_key(last_key) if last_key else None
-
+        if not domain:
+            domain = last_dom
+        if not key:
+            key = gmem.canonicalize_key(last_key) if last_key else None
     if intent["intent"].startswith("fact") and not domain and key:
         domain = gmem.detect_domain_from_key(key)
 
     try:
-        # --- Location updates/queries ---
+        # --- 3️⃣  Location updates/queries ---
         if intent["intent"] == "location.update" and scope and key == scope:
-            if value:  # guard against None
+            if value:
                 gmem.upsert_node("location", key, value, scope=scope)
                 set_last_fact(session_id, "location", key)
                 reply = f"Got it — your {key} location is {value}."
                 add_turn("assistant", reply, session_id)
                 return {"reply": reply}
-            else:
-                print("[LocationUpdateWarning] No value extracted; skipping write.")
 
         if intent["intent"] == "location.query" and scope and key == scope:
             node = gmem.get_node("location", key, scope=scope)
             set_last_fact(session_id, "location", key)
-            if key == "home":
-                reply = f"You live in {node['value']}." if node else "I'm not sure where you live."
-            elif key == "current":
-                reply = f"You're currently in {node['value']}." if node else "I'm not sure where you are right now."
-            else:
-                reply = f"Your trip destination is {node['value']}." if node else "I don't have a trip destination yet."
-            add_turn("assistant", reply, session_id)
-            return {"reply": reply}
+            msg = (
+                f"You live in {node['value']}." if key == "home" and node else
+                f"You're currently in {node['value']}." if key == "current" and node else
+                f"Your trip destination is {node['value']}." if key == "trip" and node else
+                "I'm not sure where you are right now."
+            )
+            add_turn("assistant", msg, session_id)
+            return {"reply": msg}
 
-        # --- Generic fact updates / deletes / queries ---
+        # --- 4️⃣  Generic fact updates / deletes / queries ---
         if intent["intent"] == "fact.update" and domain and key and value:
+            detected = gmem.detect_domain_from_key(key)
+            if detected and detected != domain:
+                domain = detected
             if domain == "location" and key in ("home", "current", "trip"):
                 gmem.delete_node(domain, key, scope=key)
                 gmem.upsert_node(domain, key, value, scope=key)
@@ -150,24 +133,24 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 domain = gmem.detect_domain_from_key(key)
             node = gmem.get_node(domain, key, scope="global")
             set_last_fact(session_id, domain, key)
-            reply = (f"Your {key} is {node['value']}."
-                     if node and node.get("value")
-                     else f"I’m not sure about your {key}. Tell me and I’ll remember it.")
-            add_turn("assistant", reply, session_id)
-            return {"reply": reply}
+            msg = (f"Your {key} is {node['value']}."
+                   if node and node.get("value")
+                   else f"I’m not sure about your {key}. Tell me and I’ll remember it.")
+            add_turn("assistant", msg, session_id)
+            return {"reply": msg}
 
         if intent["intent"] == "fact.delete" and domain and key:
             for sc in gmem.get_all_scopes_for_domain(domain):
                 gmem.delete_node(domain, key, sc)
             set_last_fact(session_id, domain, key)
-            reply = f"Okay — I’ve cleared your {key}. What should it be now?"
-            add_turn("assistant", reply, session_id)
-            return {"reply": reply}
+            msg = f"Okay — I’ve cleared your {key}. What should it be now?"
+            add_turn("assistant", msg, session_id)
+            return {"reply": msg}
 
     except Exception as e:
         print("[SemanticMemoryError]", e)
 
-    # 4) legacy helpers
+    # --- 5️⃣  Legacy helper fallback ---
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
@@ -192,7 +175,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     except Exception as e:
         print("[LegacyPathError]", e)
 
-    # 5) Router or brain fallback
+    # --- 6️⃣  Router or brain fallback ---
     try:
         router_output = route(text)
     except Exception as e:
@@ -218,7 +201,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # 6) Plugin dispatch
+    # --- 7️⃣  Plugin dispatch ---
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -252,6 +235,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         print("[PluginError]", e)
         return {"reply": f"Plugin error ({plugin}): {e}"}
 
+
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Echo API started — 2.9.2 stabilization (regex, negation, WAL, guards).")
+    print("✅ Echo API started — Phase 2.9.3 stabilization.")
