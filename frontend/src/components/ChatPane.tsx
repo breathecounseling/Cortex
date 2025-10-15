@@ -7,7 +7,7 @@ type Msg = { role: "user" | "assistant" | "system"; text: string };
 
 export default function ChatPane() {
   const [msgs, setMsgs] = useState<Msg[]>([
-    { role: "assistant", text: "👋 Hi! I’m Cortex — ask me to search, check weather, or find places." }
+    { role: "assistant", text: "Hi! I’m Echo. I'm here to make your life easier."}
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);

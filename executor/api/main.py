@@ -1,45 +1,68 @@
-# executor/api/main.py
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
-from typing import Any, Dict
-
+from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Core router + plugins
+# ------------------------------------------------------------
+# Sanitizer  (robust filler trimming)
+# ------------------------------------------------------------
+def sanitize_value(value: str | None) -> str | None:
+    """Cleans trailing filler words like 'now', 'right now', etc."""
+    if not value:
+        return value
+
+    value = value.strip().rstrip(".!?")
+    words = value.split()
+    if not words:
+        return value
+
+    fillers = {
+        "now", "currently", "instead", "today", "tonight",
+        "right now", "at the moment", "right", "momentarily",
+        "for now", "as of now", "at present"
+    }
+
+    last_two = " ".join(words[-2:]).lower() if len(words) >= 2 else ""
+    last_one = words[-1].lower()
+
+    if last_two in fillers:
+        words = words[:-2]
+    elif last_one in fillers:
+        words = words[:-1]
+
+    cleaned = " ".join(words).strip()
+    return cleaned
+
+
+# ------------------------------------------------------------
+# Core imports
+# ------------------------------------------------------------
+from executor.utils import memory_graph as gmem
+from executor.core.semantic_intent import analyze as analyze_intent
+from executor.utils.session_context import set_last_fact, get_last_fact
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
-
-# 🧠 Brain + flat memory
 from executor.ai.router import chat as brain_chat
 from executor.utils.memory import (
-    init_db_if_needed,
-    recall_context,
-    remember_exchange,
-    save_fact,
-    list_facts,
-    update_or_delete_from_text,
+    init_db_if_needed, recall_context, remember_exchange,
+    save_fact, list_facts, update_or_delete_from_text
 )
-
-# Vector memory (safe to keep on; summarization optional)
 from executor.utils.vector_memory import (
-    store_vector,
-    summarize_if_needed,
-    retrieve_topic_summaries,
-    hierarchical_recall,
+    store_vector, summarize_if_needed,
+    retrieve_topic_summaries, hierarchical_recall
 )
 
-# 🌐 Graph Memory (locations + general facts)
-from executor.utils import memory_graph as gmem
-
+# ------------------------------------------------------------
+# FastAPI setup
+# ------------------------------------------------------------
 app = FastAPI()
-
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
@@ -49,122 +72,175 @@ class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
     system: str | None = None
+    session_id: str | None = None
 
 
-# ------------------------------------------------------------
-# Helper utilities
-# ------------------------------------------------------------
-def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
-    """Build recent chat + summaries + vector recall context."""
-    context: list[dict[str, str]] = []
+def _session_id(request: Request, body: ChatBody) -> str:
+    return body.session_id or request.headers.get("X-Session-ID") or "default"
+
+
+def _inject_context_messages(query: str) -> list[dict[str, str]]:
+    ctx: list[dict[str, str]] = []
     try:
         init_db_if_needed()
-        context = recall_context(limit=8)
+        ctx = recall_context(limit=8)
     except Exception as e:
         print("[ContextRecallError]", e)
-        context = []
-
-    # Facts (inject for persistent memory)
+        ctx = []
     try:
         facts = list_facts()
         if facts:
-            context.insert(
-                0,
-                {"role": "system", "content": f"Known facts: {json.dumps(facts)}"},
-            )
+            ctx.insert(0, {"role": "system", "content": f"Known facts: {json.dumps(facts)}"})
     except Exception as e:
         print("[InjectFactsError]", e)
-
-    # Summaries + long-term recall
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            context.insert(0, {"role": "system", "content": "\n".join(summaries)})
+            ctx.insert(0, {"role": "system", "content": "\n".join(summaries)})
     except Exception as e:
         print("[VectorSummaryError]", e)
-
     try:
         refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if refs:
-            context.insert(0, {"role": "system", "content": "\n".join(refs)})
+            ctx.insert(0, {"role": "system", "content": "\n".join(refs)})
     except Exception as e:
         print("[VectorRecallError]", e)
+    return ctx
 
-    return context
 
-
-# ------------------------------------------------------------
-# Routes
 # ------------------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"status": "ok", "message": "Cortex API is running."}
+    return {"status": "ok", "message": "Echo API is running."}
 
 
+@app.get("/health", include_in_schema=False)
+def health():
+    return JSONResponse({"status": "ok"})
+
+
+# ------------------------------------------------------------
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    """Main conversational endpoint with semantic + graph memory."""
     try:
         raw = await request.json()
     except Exception:
         raw = {}
-    text = (
-        body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or ""
-    ).strip()
+    text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
     if not text:
         return {"reply": "How can I help?"}
 
-    # 1️⃣ Semantic classification
-    from executor.core.language_intent import classify_language_intent
-    from executor.core.intent_facts import detect_fact_or_question
-    lang_type = classify_language_intent(text)
-    semantic = detect_fact_or_question(text)
-    print(f"[LangIntent] {lang_type} :: {text}")
+    session_id = _session_id(request, body)
 
-    # 2️⃣ Handle forget/correction
+    # ------------------------------------------------------------
+    # 1️⃣ Semantic intent analysis
+    intent = analyze_intent(text)
+    print(f"[SemanticIntent] {intent}")
+
+    # 2️⃣ Resolve domain/key/value with persistence + canonicalization
+    domain: Optional[str] = intent.get("domain")
+    key_raw: Optional[str] = intent.get("key")
+    value_raw: Optional[str] = intent.get("value")
+    scope: Optional[str] = intent.get("scope")
+    key = gmem.canonicalize_key(key_raw) if key_raw else None
+    value = sanitize_value(value_raw) if value_raw else value_raw
+
+    # Load session context if needed
+    if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
+        last_dom, last_key = get_last_fact(session_id)
+        if not domain:
+            domain = last_dom
+        if not key:
+            key = gmem.canonicalize_key(last_key) if last_key else None
+
+    # Detect domain if still missing
+    if intent["intent"].startswith("fact") and not domain and key:
+        domain = gmem.detect_domain_from_key(key)
+
+    # ------------------------------------------------------------
+    # 3️⃣ Execute memory actions
     try:
-        g_forget = gmem.forget_fact_or_location(text)
-        if g_forget:
-            return {"reply": g_forget}
-    except Exception as e:
-        print("[ForgetError.Graph]", e)
+        # --- Location updates/queries ---
+        if intent["intent"] == "location.update" and scope and key == scope:
+            gmem.upsert_node("location", key, value, scope=scope)
+            set_last_fact(session_id, "location", key)
+            return {"reply": f"Got it — your {key} location is {value}."}
 
-    # 3️⃣ Handle location logic
+        if intent["intent"] == "location.query" and scope and key == scope:
+            node = gmem.get_node("location", key, scope=scope)
+            set_last_fact(session_id, "location", key)
+            if key == "home":
+                return {"reply": f"You live in {node['value']}."} if node else {"reply": "I'm not sure where you live."}
+            if key == "current":
+                return {"reply": f"You're currently in {node['value']}."} if node else {"reply": "I'm not sure where you are right now."}
+            if key == "trip":
+                return {"reply": f"Your trip destination is {node['value']}."} if node else {"reply": "I don't have a trip destination yet."}
+
+        # --- Location correction fallback ---
+        if intent["intent"] == "fact.update" and value and (not domain or not key):
+            last_dom, last_key = get_last_fact(session_id)
+            if last_dom == "location" and last_key in ("home", "current", "trip"):
+                print(f"[LocationCorrectionFallback] Updating {last_key} -> {value}")
+                gmem.delete_node("location", last_key, scope=last_key)
+                gmem.upsert_node("location", last_key, value, scope=last_key)
+                set_last_fact(session_id, "location", last_key)
+                return {"reply": f"Got it — your {last_key} is {value}."}
+
+        # --- Generic fact updates ---
+        if intent["intent"] == "fact.update" and domain and key and value:
+            if domain == "location" and key in ("home", "current", "trip"):
+                gmem.delete_node(domain, key, scope=key)
+                gmem.upsert_node(domain, key, value, scope=key)
+            else:
+                gmem.upsert_node(domain, key, value, scope="global")
+            set_last_fact(session_id, domain, key)
+            return {"reply": f"Got it — your {key} is {value}."}
+
+        # --- Fact queries (forced domain detection) ---
+        if intent["intent"].startswith("fact.query") and key:
+            if not domain:
+                domain = gmem.detect_domain_from_key(key)
+            node = gmem.get_node(domain, key, scope="global")
+            set_last_fact(session_id, domain, key)
+            if node and node.get("value"):
+                return {"reply": f"Your {key} is {node['value']}."}
+            return {"reply": f"I’m not sure about your {key}. Tell me and I’ll remember it."}
+
+        # --- Fact delete ---
+        if intent["intent"] == "fact.delete" and domain and key:
+            for sc in gmem.get_all_scopes_for_domain(domain):
+                gmem.delete_node(domain, key, sc)
+            set_last_fact(session_id, domain, key)
+            return {"reply": f"Got it — I’ve forgotten your {key}."}
+
+    except Exception as e:
+        print("[SemanticMemoryError]", e)
+
+    # ------------------------------------------------------------
+    # 4️⃣ Legacy helper fallback
     try:
         confirm = gmem.extract_and_save_location(text)
         if confirm:
+            set_last_fact(session_id, "location", "trip")
             return {"reply": confirm}
+
         maybe_loc = gmem.answer_location_question(text)
         if maybe_loc:
+            set_last_fact(session_id, "location", "trip")
             return {"reply": maybe_loc}
-    except Exception as e:
-        print("[GraphLocationError]", e)
 
-    # 4️⃣ Handle fact declarations / queries via graph
-    try:
-        # Declarative
         g_fact_confirm = gmem.extract_and_save_fact(text)
         if g_fact_confirm:
+            m = re.search(r"\bmy\s+([\w\s]+?)\s+(?:is|was|=|'s)\s+", text, re.I)
+            if m:
+                k = gmem.canonicalize_key(m.group(1))
+                set_last_fact(session_id, gmem.detect_domain_from_key(k), k)
             return {"reply": g_fact_confirm}
-
-        # Semantic declaration
-        if semantic["type"] == "fact.declaration" and semantic.get("key") and semantic.get("value"):
-            domain = gmem.detect_domain_from_key(semantic["key"])
-            gmem.upsert_node(domain, semantic["key"], semantic["value"], scope="global")
-            print(f"[Graph] Upserted: {domain}.{semantic['key']} = {semantic['value']}")
-            return {"reply": f"Got it — your {semantic['key']} is {semantic['value']}."}
-
-        # Queries
-        if semantic["type"] == "fact.query" and semantic.get("key"):
-            domain = gmem.detect_domain_from_key(semantic["key"])
-            node = gmem.get_node(domain, semantic["key"], scope="global")
-            if node and node.get("value"):
-                return {"reply": f"Your {semantic['key']} is {node['value']}."}
-            return {"reply": f"I’m not sure about your {semantic['key']}. Tell me and I’ll remember it."}
     except Exception as e:
-        print("[GraphFactError]", e)
+        print("[LegacyPathError]", e)
 
-    # 5️⃣ Route via router or fall back to brain
+    # ------------------------------------------------------------
+    # 5️⃣ Router or brain fallback
     try:
         router_output = route(text)
     except Exception as e:
@@ -173,12 +249,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     actions = router_output.get("actions", [])
     if not actions:
-        context = build_context_with_retrieval(text)
+        context = _inject_context_messages(text)
         try:
             reply = brain_chat(text, context=context)
         except Exception as e:
             reply = f"(brain offline) {e}"
-
         try:
             remember_exchange("user", text)
             remember_exchange("assistant", reply)
@@ -189,10 +264,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[VectorStoreError]", e)
         return {"reply": reply}
 
-    # 6️⃣ Plugin dispatch (unchanged)
-    ...
-
-    # 6️⃣ Plugin dispatch (if router suggested one)
+    # ------------------------------------------------------------
+    # 6️⃣ Plugin dispatch
     action = actions[0]
     plugin = action.get("plugin")
     args = action.get("args", {})
@@ -207,14 +280,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         elif plugin == "feedback":
             result = feedback.handle(args)
         else:
-            result = {
-                "status": "ok",
-                "summary": router_output.get("assistant_message", "Okay."),
-            }
-
+            result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
         summary = result.get("summary") or ""
         if len(summary.strip()) < 40:
-            context = build_context_with_retrieval(text)
+            context = _inject_context_messages(text)
             try:
                 reply = brain_chat(
                     f"{text}\n\nPlugin output:\n{summary}\n\nRespond conversationally.",
@@ -229,11 +298,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         return {"reply": f"Plugin error ({plugin}): {e}"}
 
 
-@app.get("/health", include_in_schema=False)
-def health():
-    return JSONResponse({"status": "ok"})
-
-
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Cortex API started — Phase 2.8 semantic baseline with scoped context.")
+    print("✅ Echo API started — Phase 2.8.4 (robust sanitizer + query fix).")
