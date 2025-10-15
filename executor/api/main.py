@@ -49,18 +49,21 @@ _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "di
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
 
+
 class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
     system: str | None = None
     session_id: str | None = None  # optional caller-provided session id
 
+
 # ------------------------------------------------------------
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
 
-def _inject_context_messages(query: str) -> list[dict[str,str]]:
-    ctx: list[dict[str,str]] = []
+
+def _inject_context_messages(query: str) -> list[dict[str, str]]:
+    ctx: list[dict[str, str]] = []
     try:
         init_db_if_needed()
         ctx = recall_context(limit=8)
@@ -70,31 +73,34 @@ def _inject_context_messages(query: str) -> list[dict[str,str]]:
     try:
         facts = list_facts()
         if facts:
-            ctx.insert(0, {"role":"system","content": f"Known facts: {json.dumps(facts)}"})
+            ctx.insert(0, {"role": "system", "content": f"Known facts: {json.dumps(facts)}"})
     except Exception as e:
         print("[InjectFactsError]", e)
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            ctx.insert(0, {"role":"system","content":"\n".join(summaries)})
+            ctx.insert(0, {"role": "system", "content": "\n".join(summaries)})
     except Exception as e:
         print("[VectorSummaryError]", e)
     try:
         refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if refs:
-            ctx.insert(0, {"role":"system","content":"\n".join(refs)})
+            ctx.insert(0, {"role": "system", "content": "\n".join(refs)})
     except Exception as e:
         print("[VectorRecallError]", e)
     return ctx
+
 
 # ------------------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Echo API is running."}
 
+
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
+
 
 # ------------------------------------------------------------
 @app.post("/chat")
@@ -103,7 +109,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         raw = await request.json()
     except Exception:
         raw = {}
-    text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
+    text = (
+        body.text
+        or raw.get("message")
+        or raw.get("prompt")
+        or raw.get("content")
+        or ""
+    ).strip()
     if not text:
         return {"reply": "How can I help?"}
 
@@ -115,7 +127,9 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         return {"reply": f"Your current session ID is {session_id}."}
 
     if re.match(r"^(hi|hello|hey)[!. ]*$", text.lower()):
-        return {"reply": f"Hi! I’m Echo. I'm here to make your life easier.\nYour current session ID is {session_id}."}
+        return {
+            "reply": f"Hi! I’m Echo. I'm here to make your life easier.\nYour current session ID is {session_id}."
+        }
 
     # ------------------------------------------------------------
     # 1️⃣ Semantic intent analysis
@@ -133,11 +147,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # Load session context if needed
     if intent["intent"] in ("fact.update", "fact.delete", "fact.query") and (not domain or not key):
         last_dom, last_key = get_last_fact(session_id)
-        if not domain: domain = last_dom
-        if not key: key = gmem.canonicalize_key(last_key) if last_key else None
+        if not domain:
+            domain = last_dom
+        if not key:
+            key = gmem.canonicalize_key(last_key) if last_key else None
 
     # Detect domain if still missing
-    if (intent["intent"].startswith("fact") and not domain and key):
+    if intent["intent"].startswith("fact") and not domain and key:
         domain = gmem.detect_domain_from_key(key)
 
     # ------------------------------------------------------------
@@ -153,11 +169,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             node = gmem.get_node("location", key, scope=scope)
             set_last_fact(session_id, "location", key)
             if key == "home":
-                return {"reply": f"You live in {node['value']}."} if node else {"reply":"I'm not sure where you live."}
+                return {"reply": f"You live in {node['value']}."} if node else {"reply": "I'm not sure where you live."}
             if key == "current":
-                return {"reply": f"You're currently in {node['value']}."} if node else {"reply":"I'm not sure where you are right now."}
+                return {
+                    "reply": f"You're currently in {node['value']}."
+                } if node else {"reply": "I'm not sure where you are right now."}
             if key == "trip":
-                return {"reply": f"Your trip destination is {node['value']}."} if node else {"reply":"I don't have a trip destination yet."}
+                return {
+                    "reply": f"Your trip destination is {node['value']}."
+                } if node else {"reply": "I don't have a trip destination yet."}
 
         # --- Location correction fallback ---
         if intent["intent"] == "fact.update" and value and (not domain or not key):
@@ -179,26 +199,23 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, key)
             return {"reply": f"Got it — your {key} is {value}."}
 
+        # --- Fact queries (with forced domain detection) ---
         if intent["intent"].startswith("fact.query") and key:
-    # Always infer domain if missing
-    if not domain:
-        domain = gmem.detect_domain_from_key(key)
-    node = gmem.get_node(domain, key, scope="global")
-    set_last_fact(session_id, domain, key)
-    if node and node.get("value"):
-        return {"reply": f"Your {key} is {node['value']}."}
-    return {"reply": f"I’m not sure about your {key}. Tell me and I’ll remember it."}
+            if not domain:
+                domain = gmem.detect_domain_from_key(key)
             node = gmem.get_node(domain, key, scope="global")
             set_last_fact(session_id, domain, key)
             if node and node.get("value"):
                 return {"reply": f"Your {key} is {node['value']}."}
             return {"reply": f"I’m not sure about your {key}. Tell me and I’ll remember it."}
 
+        # --- Fact delete ---
         if intent["intent"] == "fact.delete" and domain and key:
             for sc in gmem.get_all_scopes_for_domain(domain):
                 gmem.delete_node(domain, key, sc)
             set_last_fact(session_id, domain, key)
             return {"reply": f"Got it — I’ve forgotten your {key}."}
+
     except Exception as e:
         print("[SemanticMemoryError]", e)
 
@@ -285,6 +302,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         print("[PluginError]", e)
         return {"reply": f"Plugin error ({plugin}): {e}"}
 
+
 @app.on_event("startup")
 def startup_message() -> None:
-    print("✅ Echo API started — Phase 2.8.2 final (session ID reporting).")
+    print("✅ Echo API started — Phase 2.8.3 final (query fix + session ID reporting).")
