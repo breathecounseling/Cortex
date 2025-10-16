@@ -3,12 +3,12 @@ executor/utils/sanitizer.py
 ----------------------------
 Cleans user-provided values before storage.
 Removes filler words and trailing or inline temporal phrases.
+Fixes dangling punctuation (e.g. "Denver,." → "Denver").
 """
 
 from __future__ import annotations
 import re
 
-# Common filler phrases that add no semantic value to stored facts
 FILLERS = {
     "now", "currently", "instead", "today", "tonight",
     "right now", "at the moment", "for the moment",
@@ -19,8 +19,8 @@ FILLERS = {
 def sanitize_value(value: str | None) -> str | None:
     """
     Normalize and clean a user-provided value before saving to the graph.
-    Removes punctuation and common temporal fillers (e.g. "right now", "at the moment").
-    Works even when the filler appears mid-phrase, such as "Chicago right now".
+    Removes punctuation and common temporal fillers (e.g. "right now", "at the moment"),
+    and fixes leftover commas or periods.
     """
     if not value:
         return value
@@ -38,10 +38,12 @@ def sanitize_value(value: str | None) -> str | None:
         flags=re.I,
     )
 
-    # Clean up stray punctuation and double spaces left by removals
-    s = re.sub(r"\s{2,}", " ", s)      # collapse multiple spaces
-    s = re.sub(r"\s+,", ",", s)        # fix space before commas
-    s = re.sub(r",\s*,", ",", s)       # double commas
-    s = re.sub(r"\s+$", "", s)         # trailing spaces
+    # Remove extra punctuation or dangling commas created by the removals
+    s = re.sub(r"\s*,\s*(?:\.|,)*$", "", s)          # comma at end
+    s = re.sub(r"[,.]+\s*$", "", s)                  # leftover ., or , at end
+    s = re.sub(r"\s{2,}", " ", s)                    # collapse multiple spaces
+    s = re.sub(r"\s+,", ",", s)                      # fix spaces before commas
+    s = re.sub(r",\s*,", ",", s)                     # merge double commas
+    s = re.sub(r"\s+$", "", s)                       # trailing spaces
 
     return s.strip()
