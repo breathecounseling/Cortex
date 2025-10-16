@@ -1,6 +1,17 @@
-# executor/api/main.py — Phase 2.10b (reasoning & communication layer)
+"""
+executor/api/main.py
+--------------------
+Phase 2.11 — time-aware memory + personalized reasoning context
+
+Highlights:
+- Integrates gather_design_context() for personalized replies
+- Persists preferences to preference_graph
+- Logs turns to turn_log automatically (via turn_memory)
+- Maintains full 2.10b semantic + reasoning logic
+"""
+
 from __future__ import annotations
-import os, json, re
+import json, re
 from pathlib import Path
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
@@ -18,8 +29,10 @@ from executor.utils.session_context import (
 )
 from executor.utils.turn_memory import add_turn
 from executor.core.context_reasoner import reason_about_context, build_context_block
-from executor.core.reasoning import reason_about_goal, next_clarifying_reply
+from executor.core.reasoning import reason_about_goal
 from executor.utils.dialogue_templates import clarifying_line
+from executor.core.context_orchestrator import gather_design_context
+from executor.utils.preference_graph import record_preference
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
@@ -40,6 +53,7 @@ _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "di
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
 
+
 class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
@@ -47,46 +61,24 @@ class ChatBody(BaseModel):
     session_id: str | None = None
     set_intimacy: int | None = None
 
+
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
+
 
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Echo API is running."}
 
+
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
 
-def _apply_update(intent: Dict[str, Any], session_id: str) -> Optional[str]:
-    domain = intent.get("domain")
-    key    = gmem.canonicalize_key(intent.get("key")) if intent.get("key") else None
-    scope  = intent.get("scope")
-    value  = sanitize_value(intent.get("value")) if intent.get("value") else None
 
-    if intent.get("intent") == "location.update" and key in ("home","current","trip") and value:
-        gmem.upsert_node("location", key, value, scope=key)
-        set_last_fact(session_id, "location", key)
-        return f"Got it — your {key} location is {value}."
-
-    if intent.get("intent") == "fact.update" and domain and key and value:
-        detected = gmem.detect_domain_from_key(key)
-        domain = detected or domain
-        if domain == "location" and key in ("home","current","trip"):
-            gmem.delete_node(domain, key, scope=key)
-            gmem.upsert_node(domain, key, value, scope=key)
-        else:
-            gmem.upsert_node(domain, key, value, scope="global")
-        set_last_fact(session_id, domain, key)
-        return f"Got it — your {key} is {value}."
-    return None
-
-# Heuristic goal detector for pre-model 2.10b
-_GOAL_HEURISTIC_RX = re.compile(
-    r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
-    r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
-)
-
+# --------------------------------------------------------------------
+# Core chat endpoint
+# --------------------------------------------------------------------
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
@@ -102,12 +94,13 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         set_intimacy(session_id, body.set_intimacy)
     intimacy_level = get_intimacy(session_id)
 
+    # record user turn (short + persistent memory)
     add_turn("user", text, session_id=session_id)
 
-    # 1) Parse into (possibly multiple) intents
+    # 1️⃣ Parse into one or more intents
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # Topic setter (parser emits smalltalk; persist label here)
+    # Topic setter
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -116,11 +109,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     replies: list[str] = []
 
-    # 2) Reason about each intent in order
-    for p in parsed_intents:
-        intent = reason_about_context(p, text, session_id=session_id)
+    # 2️⃣ Process each intent
+    for intent in parsed_intents:
+        intent = reason_about_context(intent, text, session_id=session_id)
 
-        # Consent gate for reflective items
+        # Consent gate
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
@@ -146,12 +139,19 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # Preferences (ack only; Phase 2.11 will persist weighted prefs)
+        # Preferences (persist)
         if intent["intent"] == "preference.statement" and intent.get("key"):
-            replies.append(f"Noted — you {('like' if intent.get('polarity')==1 else 'don’t like')} {intent['key']}.")
+            item = intent["key"]
+            polarity = +1 if intent.get("polarity") == 1 else -1
+            try:
+                domain = intent.get("domain") or gmem.detect_domain_from_key(item)
+                record_preference(domain, item, polarity=polarity, strength=0.8, source="parser")
+            except Exception as e:
+                print("[PreferenceWriteError]", e)
+            replies.append(f"Noted — you {('like' if polarity>0 else 'don’t like')} {item}.")
             continue
 
-        # Negation → delete confirmation
+        # Negation deletes
         if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
             for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
                 gmem.delete_node(intent["domain"], intent["key"], sc)
@@ -160,22 +160,50 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             continue
 
         # Updates
-        write_reply = _apply_update(intent, session_id)
-        if write_reply:
-            replies.append(write_reply)
-
-        # Future: if intent is goal.statement/project.request, call reasoner here
-        if intent.get("intent") in ("goal.statement", "project.request"):
-            frame = reason_about_goal(text, session_id=session_id)
-            replies.append(clarifying_line(frame["next_question"]))
+        if intent.get("intent") == "fact.update" and intent.get("key") and intent.get("value"):
+            domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
+            val = sanitize_value(intent["value"])
+            gmem.upsert_node(domain, intent["key"], val, scope="global")
+            set_last_fact(session_id, domain, intent["key"])
+            replies.append(f"Got it — your {intent['key']} is {val}.")
             continue
 
-    # 3) Heuristic goal handling if no replies yet (pre-model 2.10b)
-    if not replies and _GOAL_HEURISTIC_RX.search(text):
-        frame = reason_about_goal(text, session_id=session_id)
-        replies.append(clarifying_line(frame["next_question"]))
+        # Goal or project request → reasoning + context
+        if intent.get("intent") in ("goal.statement", "project.request"):
+            frame = reason_about_goal(text, session_id=session_id)
+            context = gather_design_context(frame.get("goal"), session_id=session_id)
+            frame["context"] = context
 
-    # 4) Router/brain fallback
+            # personalize the clarifying reply
+            ui_palette = context["ui_prefs"].get("palette")
+            shape = context["ui_prefs"].get("shape_pref")
+            food_likes = context["domain_prefs"]["food"]["likes"]
+            hint_parts = []
+            if ui_palette:
+                hint_parts.append(f"I’ll use your {ui_palette} palette")
+            if shape:
+                hint_parts.append(f"and keep the {shape} style")
+            if food_likes:
+                hint_parts.append(f"and remember you like {', '.join(food_likes[:2])}")
+            hint = " ".join(hint_parts).strip()
+            q = clarifying_line(frame["next_question"])
+            replies.append(f"{hint}. {q}" if hint else q)
+            continue
+
+    # 3️⃣ Fallback reasoning (heuristic build)
+    GOAL_RX = re.compile(
+        r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
+        r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
+    )
+    if not replies and GOAL_RX.search(text):
+        frame = reason_about_goal(text, session_id=session_id)
+        context = gather_design_context(frame.get("goal"), session_id=session_id)
+        ui_palette = context["ui_prefs"].get("palette")
+        hint = f"I’ll use your {ui_palette} palette. " if ui_palette else ""
+        q = clarifying_line(frame["next_question"])
+        replies.append(f"{hint}{q}")
+
+    # 4️⃣ Router / brain fallback
     if not replies:
         try:
             router_output = route(text)
@@ -190,7 +218,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 reply = brain_chat(context_block)
             except Exception as e:
                 reply = f"(brain offline) {e}"
-
             try:
                 add_turn("assistant", reply, session_id)
                 remember_exchange("user", text)
@@ -234,6 +261,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[PluginError]", e)
             return {"reply": f"Plugin error ({plugin}): {e}"}
 
+    # 5️⃣ Finalize + persist assistant turn
     final_reply = " ".join(r for r in replies if r).strip()
     add_turn("assistant", final_reply, session_id)
     return {"reply": final_reply}
