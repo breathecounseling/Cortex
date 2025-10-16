@@ -1,4 +1,4 @@
-# executor/api/main.py — Phase 2.10 semantic layer integration
+# executor/api/main.py — Phase 2.10a.1 (semantic parser + consent gate; delete confirmation)
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -43,7 +43,6 @@ class ChatBody(BaseModel):
     boost: bool | None = False
     system: str | None = None
     session_id: str | None = None
-    # Optional: allow user to set intimacy with a hidden control in UI
     set_intimacy: int | None = None
 
 def _session_id(request: Request, body: ChatBody) -> str:
@@ -57,7 +56,6 @@ def root() -> Dict[str, Any]:
 def health():
     return JSONResponse({"status": "ok"})
 
-# small helper to apply writes for updates (used for multi-intent)
 def _apply_update(intent: Dict[str, Any], session_id: str) -> Optional[str]:
     domain = intent.get("domain")
     key    = gmem.canonicalize_key(intent.get("key")) if intent.get("key") else None
@@ -94,31 +92,31 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     session_id = _session_id(request, body)
     if body.set_intimacy is not None:
         set_intimacy(session_id, body.set_intimacy)
+    intimacy_level = get_intimacy(session_id)
 
     add_turn("user", text, session_id=session_id)
-    intimacy_level = get_intimacy(session_id)
 
     # 1) Parse into (possibly multiple) intents
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # 1a) Topic intro pass-through (quick set in case the parser didn't mark)
-    if re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b", text):
-        # Extract topic string for continuity
-        topic = re.sub(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b", "", text).strip(" .!?")
+    # 1a) Topic setter (parser already emits smalltalk; we persist the label here)
+    m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
+    if m_topic:
+        topic = m_topic.group(2).strip(" .!?")
         if topic:
             set_topic(session_id, topic)
 
-    # 2) Reason about each intent in order, applying consent gate for reflective items
     replies: list[str] = []
+
     for p in parsed_intents:
         intent = reason_about_context(p, text, session_id=session_id)
 
-        # Consent gate for reflective or intimate content
-        if intent.get("intent") == "reflective.question" or intent.get("intimacy", 0) > intimacy_level:
+        # Consent gate for reflective items
+        if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
 
-        # Route queries
+        # Location queries
         if intent["intent"] == "location.query" and intent.get("scope") and intent.get("key"):
             node = gmem.get_node("location", intent["key"], scope=intent["scope"])
             if intent["key"] == "home":
@@ -130,6 +128,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, "location", intent["key"])
             continue
 
+        # Fact queries
         if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
@@ -138,19 +137,27 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # Preferences: record as meta (Phase 2.11 will add a weighted table; for now, acknowledge)
+        # Preferences (ack only; Phase 2.11 will persist weighted prefs)
         if intent["intent"] == "preference.statement" and intent.get("key"):
-            # For now, just acknowledge; 2.11 will persist weighted prefs
             replies.append(f"Noted — you {('like' if intent.get('polarity')==1 else 'don’t like')} {intent['key']}.")
             continue
 
-        # Updates (location/fact)
+        # Negation → delete confirmation
+        if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
+            # perform deletes across scopes for consistency with 2.9
+            for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
+                gmem.delete_node(intent["domain"], intent["key"], sc)
+            set_last_fact(session_id, intent["domain"], intent["key"])
+            replies.append(f"Okay — I’ve cleared your {intent['key']}. What should it be now?")
+            continue
+
+        # Updates
         write_reply = _apply_update(intent, session_id)
         if write_reply:
             replies.append(write_reply)
 
-    # If nothing routed above, fall back to router/brain
     if not replies:
+        # router/brain fallback
         try:
             router_output = route(text)
         except Exception as e:
@@ -176,7 +183,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # Plugin dispatch
+        # plugin dispatch
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:
@@ -208,7 +215,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[PluginError]", e)
             return {"reply": f"Plugin error ({plugin}): {e}"}
 
-    # Join routed replies
     final_reply = " ".join(r for r in replies if r).strip()
     add_turn("assistant", final_reply, session_id)
     return {"reply": final_reply}
