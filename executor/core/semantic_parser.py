@@ -1,27 +1,11 @@
 """
 executor/core/semantic_parser.py
 --------------------------------
-Phase 2.10a.1: Semantic parser for Echo
+Phase 2.10a.2: Semantic parser for Echo
 
-- Pre-splits multi-clause messages before parsing (handles "X, but Y")
-- Accumulates multiple intents per message (no early returns)
-- Detects reflective/therapy-adjacent questions (to hit the consent gate)
-- Safe, deterministic regex + sanitizer; GPT-backed enrichment can be plugged
-  in later without changing the interface.
-
-Returned intents (list[dict]):
-{
-  "intent":  "fact.update" | "fact.query" | "location.update" | "location.query"
-             | "preference.statement" | "smalltalk" | "reflective.question",
-  "domain":  "color" | "food" | "location" | "movie" | "music" | "project" | None,
-  "key":     str | None,
-  "value":   str | None,
-  "polarity": +1 | -1 | None,
-  "scope":   "home" | "current" | "trip" | None,
-  "tone":    "positive" | "neutral" | "negative" | "reflective" | None,
-  "confidence": float,
-  "intimacy": int  # 0..3 (0 basic; 3 deep/therapeutic)
-}
+Changes from 2.10a.1
+- Adds 'and my' (and similar) to clause splitter so multi-intent sentences
+  like "I live in Chicago and my favorite food is pizza" parse correctly.
 """
 
 from __future__ import annotations
@@ -33,8 +17,11 @@ from executor.utils.sanitizer import sanitize_value
 
 
 # ---------- Clause splitter (pre-parse) ----------
-# Breaks sentences at common conjunction boundaries so each clause is parsed independently.
-_CLAUSE_SPLIT_RX = re.compile(r"\s*(?:,|;|\bbut\b|\band then\b|\bthen\b|\bhowever\b)\s*", re.I)
+# Added "and my" / "and i'm" / "and i am" boundaries for multi-intent sentences.
+_CLAUSE_SPLIT_RX = re.compile(
+    r"\s*(?:,|;|\bbut\b|\band then\b|\bthen\b|\bhowever\b|\band\s+(?:my|i'?m|i\s+am)\b)\s*",
+    re.I,
+)
 
 
 # ---------- Helper regexes ----------
@@ -106,7 +93,7 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
     if RX_WHERE_DO_I_LIVE.search(tt):
         intents.append(_mk("location.query", "location", "home", None, 0.9, scope="home"))
 
-    # Location updates (each can co-exist in same message on different clauses)
+    # Location updates
     m = RX_LIVE_IN.search(tt)
     if m:
         intents.append(_mk("location.update", "location", "home", m.group("city").strip(), 0.95, scope="home"))
@@ -153,11 +140,10 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
         intents.append(_mk("preference.statement", dom, item, None, 0.9, polarity=-1,
                            tone="negative", intimacy=min(1, intimacy_level)))
 
-    # Topic intro (handled mainly in reasoner/main)
+    # Topic intro
     if re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b", tt):
         intents.append(_mk("smalltalk", None, None, None, 0.5, tone="neutral"))
 
-    # If nothing matched, leave as smalltalk
     if not intents:
         intents.append(_mk("smalltalk", None, None, None, 0.4, tone="neutral"))
 
