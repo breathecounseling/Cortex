@@ -227,3 +227,20 @@ def forget_fact_or_location(text: str) -> Optional[str]:
         delete_node(dom, key, "global")
         return f"Got it — I've forgotten your {key}."
     return None
+
+# ---------------------------------------------------------------------
+# Topic extraction helper (for backward compatibility)
+# ---------------------------------------------------------------------
+def extract_topic_intro(text: str) -> Optional[str]:
+    """
+    Detects explicit topic-introduction phrases such as
+    'let's talk about X' or 'switch to X'.
+    ContextReasoner still imports this for topic detection.
+    """
+    if not text:
+        return None
+    m = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)", text.strip())
+    if m:
+        topic = m.group(2).strip(" .!?")
+        return topic
+    return None
