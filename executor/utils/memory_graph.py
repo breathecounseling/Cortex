@@ -1,8 +1,12 @@
 """
 executor/utils/memory_graph.py
 ------------------------------
-Phase 2.10a.5 — corrected domain detection for "favorite food" and similar keys.
-Preserves all CRUD behavior from 2.9 baseline.
+Phase 2.10a.6 — full, stable version.
+
+Includes:
+- complete CRUD + helper functions
+- contains_negation() (restored for context_reasoner)
+- corrected detect_domain_from_key() for 'favorite food' etc.
 """
 
 from __future__ import annotations
@@ -37,7 +41,8 @@ def init_graph() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_nodes_dks ON graph_nodes(domain,nkey,scope)")
     conn.commit(); conn.close()
 
-def _now() -> int: return int(time.time())
+def _now() -> int: 
+    return int(time.time())
 
 def _safe_json(obj: Any) -> str:
     try:
@@ -103,7 +108,7 @@ def delete_node(domain: str, key: str, scope: str = "global") -> bool:
     return changed
 
 # ---------------------------------------------------------------------
-# PATCH — unified forget / helpers remain unchanged
+# HELPERS
 # ---------------------------------------------------------------------
 _DOMAIN_SCOPES = {
     "location": ["home", "current", "trip", "global"],
@@ -143,7 +148,16 @@ def detect_domain_from_key(key: str) -> str:
     return dom or "misc"
 
 # ---------------------------------------------------------------------
-# LOCATION LOGIC (unchanged core)
+# NEGATION DETECTION (used by context_reasoner)
+# ---------------------------------------------------------------------
+def contains_negation(text: str) -> bool:
+    """Detect simple negation phrases in text."""
+    if not text:
+        return False
+    return bool(re.search(r"\b(not|no|never|nevermind)\b", text.lower()))
+
+# ---------------------------------------------------------------------
+# LOCATION LOGIC
 # ---------------------------------------------------------------------
 _LOC_HOME_RX = re.compile(r"\b(i\s+live\s+in|my\s+home\s+is\s+in)\s+(?P<city>[\w\s,]+)", re.I)
 _LOC_CURR_RX = re.compile(r"\b(i'?m\s+(in|at|staying\s+in|visiting)|i\s+am\s+(in|at))\s+(?P<city>[\w\s,]+)", re.I)
@@ -181,17 +195,35 @@ def answer_location_question(text: str) -> Optional[str]:
     return None
 
 # ---------------------------------------------------------------------
-# FACT / COLOR / FOOD / MISC remain unchanged
+# FACT / COLOR / FOOD / MISC
 # ---------------------------------------------------------------------
 _FACT_DECL_RX = re.compile(r"\bmy\s+(?P<key>[\w\s]+?)\s+(?:is|was|=|'s)\s+(?P<val>[^.?!]+)", re.I)
 _CHANGE_RX = re.compile(r"\b(i\s+changed\s+my\s+mind\s+about|no,\s*it's|actually\s+it's)\s+(?P<key>[\w\s]+)", re.I)
 
 def extract_and_save_fact(text: str) -> Optional[str]:
+    """Detect fact statements and route them to appropriate or new domain."""
     m = _FACT_DECL_RX.search(text or "")
-    if not m: return None
+    if not m: 
+        return None
     key = m.group("key").strip().lower()
     val = m.group("val").strip().rstrip(".!?")
     dom = detect_domain_from_key(key)
     scope = "global"
     upsert_node(dom, key, val, scope=scope)
     return f"Got it — your {key} is {val}."
+
+def forget_fact_or_location(text: str) -> Optional[str]:
+    """Forget logic per domain."""
+    t = (text or "").lower().strip()
+    m = _CHANGE_RX.search(t)
+    if m:
+        key = m.group("key").strip().lower()
+        dom = detect_domain_from_key(key)
+        delete_node(dom, key, "global")
+        return f"Got it — I've forgotten your {key}."
+    if "forget my" in t or "forget the" in t:
+        key = re.sub(r"forget\s+(my|the)\s+", "", t).strip()
+        dom = detect_domain_from_key(key)
+        delete_node(dom, key, "global")
+        return f"Got it — I've forgotten your {key}."
+    return None
