@@ -1,4 +1,4 @@
-# executor/api/main.py — Phase 2.10a.1 (semantic parser + consent gate; delete confirmation)
+# executor/api/main.py — Phase 2.10b (reasoning & communication layer)
 from __future__ import annotations
 import os, json, re
 from pathlib import Path
@@ -18,6 +18,8 @@ from executor.utils.session_context import (
 )
 from executor.utils.turn_memory import add_turn
 from executor.core.context_reasoner import reason_about_context, build_context_block
+from executor.core.reasoning import reason_about_goal, next_clarifying_reply
+from executor.utils.dialogue_templates import clarifying_line
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
@@ -79,6 +81,12 @@ def _apply_update(intent: Dict[str, Any], session_id: str) -> Optional[str]:
         return f"Got it — your {key} is {value}."
     return None
 
+# Heuristic goal detector for pre-model 2.10b
+_GOAL_HEURISTIC_RX = re.compile(
+    r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
+    r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
+)
+
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
@@ -99,7 +107,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     # 1) Parse into (possibly multiple) intents
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # 1a) Topic setter (parser already emits smalltalk; we persist the label here)
+    # Topic setter (parser emits smalltalk; persist label here)
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -108,6 +116,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     replies: list[str] = []
 
+    # 2) Reason about each intent in order
     for p in parsed_intents:
         intent = reason_about_context(p, text, session_id=session_id)
 
@@ -144,7 +153,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
         # Negation → delete confirmation
         if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
-            # perform deletes across scopes for consistency with 2.9
             for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
                 gmem.delete_node(intent["domain"], intent["key"], sc)
             set_last_fact(session_id, intent["domain"], intent["key"])
@@ -156,8 +164,19 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         if write_reply:
             replies.append(write_reply)
 
+        # Future: if intent is goal.statement/project.request, call reasoner here
+        if intent.get("intent") in ("goal.statement", "project.request"):
+            frame = reason_about_goal(text, session_id=session_id)
+            replies.append(clarifying_line(frame["next_question"]))
+            continue
+
+    # 3) Heuristic goal handling if no replies yet (pre-model 2.10b)
+    if not replies and _GOAL_HEURISTIC_RX.search(text):
+        frame = reason_about_goal(text, session_id=session_id)
+        replies.append(clarifying_line(frame["next_question"]))
+
+    # 4) Router/brain fallback
     if not replies:
-        # router/brain fallback
         try:
             router_output = route(text)
         except Exception as e:
