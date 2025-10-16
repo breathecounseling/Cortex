@@ -1,13 +1,11 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.11 — time-aware memory + personalized reasoning context
+Phase 2.11.2 — preference query support + time-aware memory
 
-Highlights:
-- Integrates gather_design_context() for personalized replies
-- Persists preferences to preference_graph
-- Logs turns to turn_log automatically (via turn_memory)
-- Maintains full 2.10b semantic + reasoning logic
+Adds:
+- preference.query handler (food/ui) reading from preferences table
+- keeps 2.11 personalized reasoning, turn logging, and persistence
 """
 
 from __future__ import annotations
@@ -32,7 +30,7 @@ from executor.core.context_reasoner import reason_about_context, build_context_b
 from executor.core.reasoning import reason_about_goal
 from executor.utils.dialogue_templates import clarifying_line
 from executor.core.context_orchestrator import gather_design_context
-from executor.utils.preference_graph import record_preference
+from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
@@ -76,9 +74,6 @@ def health():
     return JSONResponse({"status": "ok"})
 
 
-# --------------------------------------------------------------------
-# Core chat endpoint
-# --------------------------------------------------------------------
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
@@ -94,13 +89,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         set_intimacy(session_id, body.set_intimacy)
     intimacy_level = get_intimacy(session_id)
 
-    # record user turn (short + persistent memory)
     add_turn("user", text, session_id=session_id)
 
-    # 1️⃣ Parse into one or more intents
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # Topic setter
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -109,13 +101,17 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     replies: list[str] = []
 
-    # 2️⃣ Process each intent
-    for intent in parsed_intents:
-        intent = reason_about_context(intent, text, session_id=session_id)
+    for p in parsed_intents:
+        intent = reason_about_context(p, text, session_id=session_id)
 
         # Consent gate
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
+            continue
+
+        # Temporal recall (reasoner can pre-fill a reply)
+        if intent.get("intent") == "temporal.recall" and intent.get("reply"):
+            replies.append(intent["reply"])
             continue
 
         # Location queries
@@ -130,13 +126,36 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, "location", intent["key"])
             continue
 
-        # Fact queries
+        # Fact queries (graph-backed)
         if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
             replies.append(f"Your {intent['key']} is {node['value']}." if node and node.get("value")
                            else f"I’m not sure about your {intent['key']}. Tell me and I’ll remember it.")
             set_last_fact(session_id, domain, intent["key"])
+            continue
+
+        # Preference queries (preferences-backed)
+        if intent.get("intent") == "preference.query":
+            qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
+            # food / ui support now; others later
+            if qdom == "food":
+                likes = [p["item"] for p in get_preferences("food", min_strength=0.0) if p["polarity"] > 0]
+                dislikes = [p["item"] for p in get_dislikes("food")]
+                parts = []
+                if likes:
+                    parts.append(f"you love {', '.join(sorted(set(likes)))}")
+                if dislikes:
+                    parts.append(f"you don't like {', '.join(sorted(set(dislikes)))}")
+                replies.append("Based on what you've shared, " + " and ".join(parts) + ".")
+            elif qdom == "ui":
+                likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]
+                if likes:
+                    replies.append(f"You like these layout styles: {', '.join(sorted(set(likes)))}.")
+                else:
+                    replies.append("I don't have any saved layout preferences yet.")
+            else:
+                replies.append("I can check what you like if you tell me the category (e.g., foods, layouts).")
             continue
 
         # Preferences (persist)
@@ -174,10 +193,9 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             context = gather_design_context(frame.get("goal"), session_id=session_id)
             frame["context"] = context
 
-            # personalize the clarifying reply
             ui_palette = context["ui_prefs"].get("palette")
             shape = context["ui_prefs"].get("shape_pref")
-            food_likes = context["domain_prefs"]["food"]["likes"]
+            food_likes = context["domain_prefs"].get("food", {}).get("likes", [])
             hint_parts = []
             if ui_palette:
                 hint_parts.append(f"I’ll use your {ui_palette} palette")
@@ -190,7 +208,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"{hint}. {q}" if hint else q)
             continue
 
-    # 3️⃣ Fallback reasoning (heuristic build)
+    # Heuristic goal detection if nothing routed (same as 2.11)
     GOAL_RX = re.compile(
         r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
         r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
@@ -203,7 +221,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         q = clarifying_line(frame["next_question"])
         replies.append(f"{hint}{q}")
 
-    # 4️⃣ Router / brain fallback
+    # Router / brain fallback (unchanged)
     if not replies:
         try:
             router_output = route(text)
@@ -229,7 +247,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # plugin dispatch
+        # plugin dispatch ...
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:
@@ -261,7 +279,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[PluginError]", e)
             return {"reply": f"Plugin error ({plugin}): {e}"}
 
-    # 5️⃣ Finalize + persist assistant turn
     final_reply = " ".join(r for r in replies if r).strip()
     add_turn("assistant", final_reply, session_id)
     return {"reply": final_reply}
