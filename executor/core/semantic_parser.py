@@ -1,11 +1,13 @@
 """
 executor/core/semantic_parser.py
 --------------------------------
-Phase 2.10a.2: Semantic parser for Echo
+Phase 2.10a.3: Semantic parser for Echo
 
-Changes from 2.10a.1
-- Adds 'and my' (and similar) to clause splitter so multi-intent sentences
-  like "I live in Chicago and my favorite food is pizza" parse correctly.
+- Pre-splits multi-clause messages (handles "X, but Y", "and my …")
+- Normalizes clauses before parsing
+- Accumulates multiple intents per message
+- Detects reflective / therapy-adjacent questions (consent gate)
+- Safe deterministic regex + sanitizer; GPT-backed enrichment can plug in later.
 """
 
 from __future__ import annotations
@@ -154,13 +156,16 @@ def parse_message(text: str, intimacy_level: int = 0) -> List[Dict[str, Any]]:
     """
     Deterministic parser that:
       - splits into clauses first
+      - trims punctuation and spaces
       - parses each clause independently
       - concatenates all detected intents in order
     """
     if not text or not text.strip():
         return [_mk("smalltalk", None, None, None, 0.3, tone="neutral")]
     intents: List[Dict[str, Any]] = []
-    clauses = [c for c in _CLAUSE_SPLIT_RX.split(text) if c and c.strip()]
+    # Normalize clauses before parsing (fix for leading/trailing punctuation)
+    clauses = [c.strip(" ,;.") for c in _CLAUSE_SPLIT_RX.split(text) if c and c.strip()]
+    print(f"[ClauseSplit] {clauses}")  # optional debug; comment out in production
     for clause in clauses:
         intents.extend(_parse_single_clause(clause, intimacy_level))
     return intents
