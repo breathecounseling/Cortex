@@ -1,13 +1,17 @@
 """
 executor/core/semantic_parser.py
 --------------------------------
-Phase 2.10a.3: Semantic parser for Echo
+Phase 2.10a.4: Semantic parser for Echo
 
-- Pre-splits multi-clause messages (handles "X, but Y", "and my …")
-- Normalizes clauses before parsing
-- Accumulates multiple intents per message
-- Detects reflective / therapy-adjacent questions (consent gate)
-- Safe deterministic regex + sanitizer; GPT-backed enrichment can plug in later.
+Updates
+- Clause splitter handles "and my"/"and I'm"/"and I am".
+- Clauses normalized before parsing.
+- Optional pronoun in 'favorite' pattern (matches "favorite food is pizza"
+  as well as "my favorite food is pizza").
+- Accumulates multiple intents per message.
+- Detects reflective / therapy-adjacent questions (consent gate).
+
+Deterministic regex parser; GPT-backed enrichment can plug in later.
 """
 
 from __future__ import annotations
@@ -19,12 +23,10 @@ from executor.utils.sanitizer import sanitize_value
 
 
 # ---------- Clause splitter (pre-parse) ----------
-# Added "and my" / "and i'm" / "and i am" boundaries for multi-intent sentences.
 _CLAUSE_SPLIT_RX = re.compile(
     r"\s*(?:,|;|\bbut\b|\band then\b|\bthen\b|\bhowever\b|\band\s+(?:my|i'?m|i\s+am)\b)\s*",
     re.I,
 )
-
 
 # ---------- Helper regexes ----------
 RX_WHATS_MY = re.compile(r"(?i)\b(what('?s| is)\s+my)\s+(?P<key>.+?)\??$")
@@ -32,23 +34,25 @@ RX_WHERE_AM_I = re.compile(r"(?i)\bwhere\s+am\s+i(\s+now)?\??$")
 RX_WHERE_DO_I_LIVE = re.compile(r"(?i)\bwhere\s+do\s+i\s+live\??$")
 RX_WHERE_AM_I_GOING = re.compile(r"(?i)\b(where\s+am\s+i\s+going|trip\s+destination|where\s+is\s+my\s+trip)\??$")
 
-# location updates
+# Location updates
 RX_LIVE_IN = re.compile(r"(?i)\b(i\s+live\s+in|my\s+home\s+is\s+in)\s+(?P<city>.+)$")
 RX_IM_IN = re.compile(r"(?i)\b(i'?m|i\s+am)\s+(?:currently\s+)?(?:in|at|staying\s+in|visiting)\s+(?P<city>.+)$")
 RX_TRIP_TO = re.compile(r"(?i)\b(i'?m\s+(?:going|heading)\s+to|trip\s+to|i'?m\s+planning\s+(?:a\s+)?trip\s+to)\s+(?P<city>.+)$")
 
-# fact updates
-RX_MY_FAVORITE = re.compile(r"(?i)\bmy\s+(?P<key>.+?)\s+(?:is|=|'s)\s+(?P<val>.+)$")
+# Fact updates
+RX_MY_FAVORITE = re.compile(
+    r"(?i)\b(?:my|your|our|the)?\s*favorite\s+(?P<key>[\w\s]+?)\s+(?:is|=|'s)\s+(?P<val>.+)$"
+)
 RX_CHANGE_MY = re.compile(r"(?i)\bchange\s+my\s+(?P<key>.+?)\s+to\s+(?P<val>.+)$")
 
-# preferences / sentiments
+# Preferences / sentiments
 RX_I_LIKE = re.compile(r"(?i)\b(i\s+(?:really\s+)?(?:like|love|enjoy|am\s+into)\s+)(?P<item>.+)$")
 RX_I_DISLIKE = re.compile(r"(?i)\b(i\s+(?:don'?t\s+like|dislike|hate|can'?t\s+stand)\s+)(?P<item>.+)$")
 
-# negation for follow-up handling (kept in reasoner)
+# Negation for follow-up handling (kept in reasoner)
 RX_NEGATION = re.compile(r"(?i)^(?:no[, ]*|actually[, ]*)?\s*not\s+(?P<val>.+)$")
 
-# reflective questions (to hit consent gate)
+# Reflective questions (to hit consent gate)
 RX_REFLECTIVE = re.compile(r"(?i)\b(why|how\s+come|what\s+makes|what\s+causes)\b.*\b(i|me|my)\b")
 
 
@@ -163,9 +167,8 @@ def parse_message(text: str, intimacy_level: int = 0) -> List[Dict[str, Any]]:
     if not text or not text.strip():
         return [_mk("smalltalk", None, None, None, 0.3, tone="neutral")]
     intents: List[Dict[str, Any]] = []
-    # Normalize clauses before parsing (fix for leading/trailing punctuation)
     clauses = [c.strip(" ,;.") for c in _CLAUSE_SPLIT_RX.split(text) if c and c.strip()]
-    print(f"[ClauseSplit] {clauses}")  # optional debug; comment out in production
+    print(f"[ClauseSplit] {clauses}")  # optional debug; remove in production
     for clause in clauses:
         intents.extend(_parse_single_clause(clause, intimacy_level))
     return intents
