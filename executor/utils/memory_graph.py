@@ -1,12 +1,12 @@
 """
 executor/utils/memory_graph.py
 ------------------------------
-Phase 2.10a.6 — full, stable version.
+Phase 2.10a.7 — full stable release.
 
 Includes:
-- complete CRUD + helper functions
-- contains_negation() (restored for context_reasoner)
-- corrected detect_domain_from_key() for 'favorite food' etc.
+- CRUD + helpers (unchanged from 2.9)
+- canonicalize_key(), contains_negation(), extract_topic_intro()
+- corrected detect_domain_from_key() for “favorite food” etc.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def init_graph() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_nodes_dks ON graph_nodes(domain,nkey,scope)")
     conn.commit(); conn.close()
 
-def _now() -> int: 
+def _now() -> int:
     return int(time.time())
 
 def _safe_json(obj: Any) -> str:
@@ -66,6 +66,20 @@ def _row_to_node(row: Tuple) -> Dict[str, Any]:
         "created_at": int(created_at),
         "updated_at": int(updated_at),
     }
+
+# ---------------------------------------------------------------------
+# KEY NORMALIZATION
+# ---------------------------------------------------------------------
+def canonicalize_key(key: str) -> str:
+    """
+    Normalize a fact key so different phrasings map to the same memory slot.
+    Example: 'Favorite Color', 'favorite color?' -> 'favorite color'
+    """
+    if not key:
+        return ""
+    cleaned = re.sub(r"[^\w\s]", "", key).strip().lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
 
 # ---------------------------------------------------------------------
 # CORE CRUD
@@ -121,23 +135,20 @@ def get_all_scopes_for_domain(domain: str) -> List[str]:
     return _DOMAIN_SCOPES.get(domain, ["global"])
 
 # ---------------------------------------------------------------------
-# AUTO-EXTENSIBLE DOMAIN DETECTION (corrected)
+# AUTO-EXTENSIBLE DOMAIN DETECTION
 # ---------------------------------------------------------------------
 def detect_domain_from_key(key: str) -> str:
     """
     Infer or create a domain name dynamically from a fact key.
-    Adjusted to prevent over-aggressive truncation (e.g., 'favorite food' -> 'food').
+    Adjusted to prevent over-aggressive truncation.
     """
     k = key.lower().strip()
-    # specific domains
     if "color" in k: return "color"
     if "food" in k or "favorite food" in k: return "food"
     if "location" in k or "home" in k or "trip" in k: return "location"
     if "movie" in k or "film" in k: return "movie"
     if "song" in k or "music" in k: return "music"
     if "project" in k: return "project"
-
-    # otherwise, heuristic first word that isn't generic
     words = k.split()
     dom = "misc"
     if words:
@@ -155,6 +166,22 @@ def contains_negation(text: str) -> bool:
     if not text:
         return False
     return bool(re.search(r"\b(not|no|never|nevermind)\b", text.lower()))
+
+# ---------------------------------------------------------------------
+# TOPIC EXTRACTION (used by context_reasoner)
+# ---------------------------------------------------------------------
+def extract_topic_intro(text: str) -> Optional[str]:
+    """
+    Detects explicit topic-introduction phrases such as
+    'let's talk about X' or 'switch to X'.
+    """
+    if not text:
+        return None
+    m = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)", text.strip())
+    if m:
+        topic = m.group(2).strip(" .!?")
+        return topic
+    return None
 
 # ---------------------------------------------------------------------
 # LOCATION LOGIC
@@ -180,11 +207,13 @@ def extract_and_save_location(text: str) -> Optional[str]:
 def answer_location_question(text: str) -> Optional[str]:
     q = re.sub(r"[?.!]+$", "", (text or "").lower().strip())
     q = re.sub(r"\s+", " ", q)
-    if any(p in q for p in ["where am i going", "trip destination", "where is my trip", "what is my trip destination", "where will i go", "where am i traveling"]):
+    if any(p in q for p in ["where am i going", "trip destination", "where is my trip",
+                            "what is my trip destination", "where will i go", "where am i traveling"]):
         t = get_node("location", "trip", "trip")
         if t: return f"Your trip destination is {t['value']}."
         return "I don't have a trip destination yet."
-    if any(p in q for p in ["where am i", "where am i now", "where am i visiting", "where am i staying", "current location"]):
+    if any(p in q for p in ["where am i", "where am i now", "where am i visiting",
+                            "where am i staying", "current location"]):
         c = get_node("location", "current", "current")
         if c: return f"You're currently in {c['value']}."
         return "I'm not sure where you are right now."
@@ -203,7 +232,7 @@ _CHANGE_RX = re.compile(r"\b(i\s+changed\s+my\s+mind\s+about|no,\s*it's|actually
 def extract_and_save_fact(text: str) -> Optional[str]:
     """Detect fact statements and route them to appropriate or new domain."""
     m = _FACT_DECL_RX.search(text or "")
-    if not m: 
+    if not m:
         return None
     key = m.group("key").strip().lower()
     val = m.group("val").strip().rstrip(".!?")
@@ -226,21 +255,4 @@ def forget_fact_or_location(text: str) -> Optional[str]:
         dom = detect_domain_from_key(key)
         delete_node(dom, key, "global")
         return f"Got it — I've forgotten your {key}."
-    return None
-
-# ---------------------------------------------------------------------
-# Topic extraction helper (for backward compatibility)
-# ---------------------------------------------------------------------
-def extract_topic_intro(text: str) -> Optional[str]:
-    """
-    Detects explicit topic-introduction phrases such as
-    'let's talk about X' or 'switch to X'.
-    ContextReasoner still imports this for topic detection.
-    """
-    if not text:
-        return None
-    m = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)", text.strip())
-    if m:
-        topic = m.group(2).strip(" .!?")
-        return topic
     return None
