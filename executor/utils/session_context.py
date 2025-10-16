@@ -1,9 +1,12 @@
-# executor/utils/session_context.py
 """
+executor/utils/session_context.py
+---------------------------------
 Persistent session context helpers for Echo:
 - last fact (domain, key)
 - last topic (topic string)
-Includes auto-migration for legacy DBs (adds last_topic column if missing).
+- intimacy level (0..3) for consent-gated reflective prompts
+
+Includes auto-migration for legacy DBs.
 """
 
 from __future__ import annotations
@@ -23,23 +26,23 @@ def _has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
 
 def _init() -> None:
     conn = _connect(); c = conn.cursor()
-    # Create table if missing (original 2.9.x schema added last_topic)
     c.execute("""
         CREATE TABLE IF NOT EXISTS session_context(
             session_id TEXT PRIMARY KEY,
             last_domain TEXT,
             last_key TEXT,
             last_topic TEXT,
+            intimacy_level INTEGER DEFAULT 0,
             updated_at INTEGER
         )
     """)
-    # Auto-migrate legacy DBs without last_topic
+    # migrations for legacy dbs
     if not _has_column(conn, "session_context", "last_topic"):
-        try:
-            c.execute("ALTER TABLE session_context ADD COLUMN last_topic TEXT")
-        except sqlite3.OperationalError:
-            # Column could already exist in a race or another process did it
-            pass
+        try: c.execute("ALTER TABLE session_context ADD COLUMN last_topic TEXT")
+        except sqlite3.OperationalError: pass
+    if not _has_column(conn, "session_context", "intimacy_level"):
+        try: c.execute("ALTER TABLE session_context ADD COLUMN intimacy_level INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
     conn.commit(); conn.close()
 
 def set_last_fact(session_id: str, domain: str, key: str) -> None:
@@ -47,13 +50,13 @@ def set_last_fact(session_id: str, domain: str, key: str) -> None:
     conn = _connect(); c = conn.cursor()
     ts = int(time.time())
     c.execute("""
-        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,updated_at)
-        VALUES(?,?,?,?,?)
+        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,intimacy_level,updated_at)
+        VALUES(?,?,?,?,?,?)
         ON CONFLICT(session_id)
         DO UPDATE SET last_domain=excluded.last_domain,
                       last_key=excluded.last_key,
                       updated_at=excluded.updated_at
-    """, (session_id, domain, key, None, ts))
+    """, (session_id, domain, key, None, None, ts))
     conn.commit(); conn.close()
 
 def get_last_fact(session_id: str) -> Tuple[Optional[str], Optional[str]]:
@@ -68,21 +71,39 @@ def set_topic(session_id: str, topic: str) -> None:
     conn = _connect(); c = conn.cursor()
     ts = int(time.time())
     c.execute("""
-        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,updated_at)
-        VALUES(?,?,?,?,?)
+        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,intimacy_level,updated_at)
+        VALUES(?,?,?,?,?,?)
         ON CONFLICT(session_id)
         DO UPDATE SET last_topic=excluded.last_topic,
                       updated_at=excluded.updated_at
-    """, (session_id, None, None, topic.strip(), ts))
+    """, (session_id, None, None, topic.strip(), None, ts))
     conn.commit(); conn.close()
 
 def get_topic(session_id: str) -> Optional[str]:
     _init()
     conn = _connect(); c = conn.cursor()
-    try:
-        c.execute("SELECT last_topic FROM session_context WHERE session_id=? LIMIT 1", (session_id,))
-    except sqlite3.OperationalError:
-        # Legacy DB without column (shouldn’t happen after _init, but safe-guard)
-        conn.close(); return None
+    c.execute("SELECT last_topic FROM session_context WHERE session_id=? LIMIT 1", (session_id,))
     row = c.fetchone(); conn.close()
     return row[0] if row and row[0] else None
+
+def set_intimacy(session_id: str, level: int) -> None:
+    """level: 0 basic, 1 conversational, 2 reflective, 3 deep/therapeutic (requires explicit consent)"""
+    _init()
+    level = max(0, min(3, int(level)))
+    conn = _connect(); c = conn.cursor()
+    ts = int(time.time())
+    c.execute("""
+        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,intimacy_level,updated_at)
+        VALUES(?,?,?,?,?,?)
+        ON CONFLICT(session_id)
+        DO UPDATE SET intimacy_level=excluded.intimacy_level,
+                      updated_at=excluded.updated_at
+    """, (session_id, None, None, None, level, ts))
+    conn.commit(); conn.close()
+
+def get_intimacy(session_id: str) -> int:
+    _init()
+    conn = _connect(); c = conn.cursor()
+    c.execute("SELECT intimacy_level FROM session_context WHERE session_id=? LIMIT 1", (session_id,))
+    row = c.fetchone(); conn.close()
+    return int(row[0]) if row and row[0] is not None else 0
