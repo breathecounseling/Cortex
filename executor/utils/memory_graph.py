@@ -1,7 +1,7 @@
 """
 executor/utils/memory_graph.py
 ------------------------------
-Phase 2.11 — full stable version with broader domain detection for UI phrases.
+Phase 2.11.1 — domain detection expanded for UI/food terms; full stable CRUD.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def init_graph() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_nodes_dks ON graph_nodes(domain,nkey,scope)")
     conn.commit(); conn.close()
 
-def _now() -> int:
+def _now() -> int: 
     return int(time.time())
 
 def _safe_json(obj: Any) -> str:
@@ -125,23 +125,34 @@ def get_all_scopes_for_domain(domain: str) -> List[str]:
     return _DOMAIN_SCOPES.get(domain, ["global"])
 
 # ---------------------------------------------------------------------
-# AUTO-EXTENSIBLE DOMAIN DETECTION (expanded for UI/visual terms)
+# AUTO-EXTENSIBLE DOMAIN DETECTION (expanded for UI/food)
 # ---------------------------------------------------------------------
 def detect_domain_from_key(key: str) -> str:
     """
     Infer or create a domain name dynamically from a fact key.
     Expanded rules so UI/layout/chart terms map to 'ui';
-    'earth tones' maps to 'color'.
+    single-ingredient nouns map to 'food'.
     """
     k = (key or "").lower().strip()
 
-    # direct domain cues
+    # --- Food keywords (single items & cuisines) ---
+    if any(word in k for word in [
+        "food","cuisine","dish","meal",
+        "seafood","broccoli","pasta","sushi",
+        "pizza","oyster","oysters","gumbo","liver","anchovy","anchovies",
+        "ramen","curry","taco","tacos","noodle","noodles"
+    ]):
+        return "food"
+
+    # --- Color & palette ---
     if "color" in k or ("earth" in k and "tone" in k):
         return "color"
-    if "food" in k or "favorite food" in k or "cuisine" in k:
-        return "food"
+
+    # --- Location ---
     if "location" in k or "home" in k or "trip" in k or "city" in k:
         return "location"
+
+    # --- Media/Project ---
     if "movie" in k or "film" in k:
         return "movie"
     if "song" in k or "music" in k:
@@ -149,14 +160,14 @@ def detect_domain_from_key(key: str) -> str:
     if "project" in k:
         return "project"
 
-    # UI/visual language
+    # --- UI / visual language ---
     if any(token in k for token in [
-        "ui", "layout", "palette", "theme", "rounded", "corners",
-        "donut", "chart", "charts", "dashboard", "typography", "density"
+        "ui","layout","palette","theme","rounded","corner",
+        "donut","chart","charts","dashboard","typography","density","font"
     ]):
         return "ui"
 
-    # fallback heuristic: first non-generic token
+    # fallback heuristic
     words = k.split()
     dom = "misc"
     if words:
@@ -167,16 +178,13 @@ def detect_domain_from_key(key: str) -> str:
     return dom or "misc"
 
 # ---------------------------------------------------------------------
-# NEGATION DETECTION (used by context_reasoner)
+# NEGATION & TOPIC HELPERS
 # ---------------------------------------------------------------------
 def contains_negation(text: str) -> bool:
     if not text:
         return False
     return bool(re.search(r"\b(not|no|never|nevermind)\b", text.lower()))
 
-# ---------------------------------------------------------------------
-# TOPIC EXTRACTION (used by context_reasoner)
-# ---------------------------------------------------------------------
 def extract_topic_intro(text: str) -> Optional[str]:
     if not text:
         return None
