@@ -1,11 +1,13 @@
 """
 executor/core/semantic_parser.py
 --------------------------------
-Phase 2.11.1 — deterministic semantic parser (with tracing)
+Phase 2.11.2 — deterministic semantic parser (with tracing & pref-query)
 
 - Clause splitting for multi-intent messages
-- Explicit regex coverage for queries, fact updates, preferences
+- Regex coverage for queries, fact updates, preferences
 - Improved trip detection ("heading to X", "going to X")
+- Multi-item preference splitting ("I like sushi, pizza and ramen")
+- Preference query detection ("what foods do I love", "what layouts do I like")
 - Lightweight tracing you can enable with SEM_TRACE = True
 """
 
@@ -46,6 +48,11 @@ _CLAUSE_SPLIT_RX = re.compile(
 # Canonical "what's my X"
 RX_WHATS_MY = re.compile(r"(?i)\b(what('?s| is)\s+my)\s+(?P<key>.+?)\??$")
 
+# Preference queries ("what foods do I like/love/enjoy", "what layouts do I like")
+RX_WHAT_LIKE = re.compile(
+    r"(?i)\bwhat\s+(?P<key>[\w\s]+?)\s+do\s+i\s+(?:like|love|prefer|enjoy)\b"
+)
+
 # Location questions
 RX_WHERE_AM_I       = re.compile(r"(?i)\bwhere\s+am\s+i(\s+now)?\??$")
 RX_WHERE_DO_I_LIVE  = re.compile(r"(?i)\bwhere\s+do\s+i\s+live\??$")
@@ -71,9 +78,6 @@ RX_NEGATION    = re.compile(r"(?i)^(?:no[, ]*|actually[, ]*)?\s*not\s+(?P<val>.+
 RX_REFLECTIVE  = re.compile(r"(?i)\b(why|how\s+come|what\s+makes|what\s+causes)\b.*\b(i|me|my)\b")
 
 
-# ============================================================
-# Intent factory
-# ============================================================
 def _mk(intent: str, domain: str | None, key: str | None, value: str | None,
         confidence: float, scope: str | None = None,
         polarity: int | None = None, tone: str | None = None,
@@ -91,9 +95,19 @@ def _mk(intent: str, domain: str | None, key: str | None, value: str | None,
     }
 
 
-# ============================================================
-# Single clause parsing
-# ============================================================
+def _split_items(raw: str) -> List[str]:
+    """Split lists like 'sushi, pizza and ramen' into separate items."""
+    if not raw:
+        return []
+    # normalize separators
+    s = raw.strip().rstrip(".!?")
+    # split on commas or ' and '
+    parts = re.split(r"\s*(?:,| and )\s*", s, flags=re.I)
+    # filter empties, trim
+    items = [p.strip() for p in parts if p.strip()]
+    return items or [s]
+
+
 def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
     intents: List[Dict[str, Any]] = []
     tt = (t or "").strip()
@@ -105,7 +119,16 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
         trace("reflective.question:", tt)
         intents.append(_mk("reflective.question", None, None, None, 0.9, tone="reflective", intimacy=2))
 
-    # Canonical questions
+    # Preference query (e.g., "what foods do I like", "what layouts do I like")
+    m = RX_WHAT_LIKE.search(tt)
+    if m:
+        key = m.group("key").strip()
+        dom = gmem.detect_domain_from_key(key)
+        trace("preference.query:", key, "→", dom)
+        intents.append(_mk("preference.query", dom, key, None, 0.9))
+        # don't return; a clause can both query and have other info, but rare
+
+    # Canonical "what's my X"
     m = RX_WHATS_MY.search(tt)
     if m:
         key = m.group("key").strip()
@@ -113,6 +136,7 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
         trace("fact.query:", key, "→", dom)
         intents.append(_mk("fact.query", dom, key, None, 0.85))
 
+    # Location questions
     if RX_WHERE_AM_I_GOING.search(tt):
         trace("location.query: trip")
         intents.append(_mk("location.query", "location", "trip", None, 0.9, scope="trip"))
@@ -169,23 +193,25 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
         trace("negation:", val)
         intents.append(_mk("fact.update", None, None, f"not {val}", 0.5))
 
-    # Preferences: positive
+    # Preferences: positive (multi-item split)
     m = RX_I_LIKE.search(tt)
     if m:
-        item = m.group("item").strip().rstrip(".!?")
-        dom = gmem.detect_domain_from_key(item)
-        trace("preference.statement (+):", item, "→", dom)
-        intents.append(_mk("preference.statement", dom, item, None, 0.9,
-                           polarity=+1, tone="positive", intimacy=min(1, intimacy_level)))
+        raw = m.group("item").strip()
+        for item in _split_items(raw):
+            dom = gmem.detect_domain_from_key(item)
+            trace("preference.statement (+):", item, "→", dom)
+            intents.append(_mk("preference.statement", dom, item, None, 0.9,
+                               polarity=+1, tone="positive", intimacy=min(1, intimacy_level)))
 
-    # Preferences: negative
+    # Preferences: negative (multi-item split)
     m = RX_I_DISLIKE.search(tt)
     if m:
-        item = m.group("item").strip().rstrip(".!?")
-        dom = gmem.detect_domain_from_key(item)
-        trace("preference.statement (-):", item, "→", dom)
-        intents.append(_mk("preference.statement", dom, item, None, 0.9,
-                           polarity=-1, tone="negative", intimacy=min(1, intimacy_level)))
+        raw = m.group("item").strip()
+        for item in _split_items(raw):
+            dom = gmem.detect_domain_from_key(item)
+            trace("preference.statement (-):", item, "→", dom)
+            intents.append(_mk("preference.statement", dom, item, None, 0.9,
+                               polarity=-1, tone="negative", intimacy=min(1, intimacy_level)))
 
     # Topic intro
     if re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b", tt):
@@ -198,9 +224,6 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
     return intents
 
 
-# ============================================================
-# Public API
-# ============================================================
 def parse_message(text: str, intimacy_level: int = 0) -> List[Dict[str, Any]]:
     """
     Split message into clauses, parse each, and combine intents.
