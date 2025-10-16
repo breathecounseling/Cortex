@@ -1,17 +1,16 @@
 """
 executor/core/semantic_parser.py
 --------------------------------
-Phase 2.10a.4: Semantic parser for Echo
+Phase 2.10a.8: Semantic parser for Echo
 
-Updates
-- Clause splitter handles "and my"/"and I'm"/"and I am".
-- Clauses normalized before parsing.
-- Optional pronoun in 'favorite' pattern (matches "favorite food is pizza"
-  as well as "my favorite food is pizza").
-- Accumulates multiple intents per message.
-- Detects reflective / therapy-adjacent questions (consent gate).
+Updates:
+- Ensures 'favorite' keys preserve the full phrase ('favorite food', not just 'food')
+- Clause splitter handles 'and my'/'and I'm'/'and I am'
+- Normalizes clauses before parsing
+- Accumulates multiple intents per message
+- Detects reflective / therapy-adjacent questions (consent gate)
 
-Deterministic regex parser; GPT-backed enrichment can plug in later.
+This is the final deterministic semantic parser before model-backed parsing (2.10b).
 """
 
 from __future__ import annotations
@@ -121,7 +120,9 @@ def _parse_single_clause(t: str, intimacy_level: int) -> List[Dict[str, Any]]:
 
     m = RX_MY_FAVORITE.search(tt)
     if m:
-        key = m.group("key").strip()
+        raw_key = m.group("key").strip()
+        # ensure we preserve 'favorite' context for the key
+        key = f"favorite {raw_key}" if not raw_key.lower().startswith("favorite") else raw_key
         val = m.group("val").strip()
         intents.append(_mk("fact.update", gmem.detect_domain_from_key(key), key, val, 0.92))
 
