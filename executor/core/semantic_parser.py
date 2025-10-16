@@ -57,6 +57,11 @@ RX_I_DISLIKE = re.compile(
     r"(?i)\b(i\s+(?:don'?t\s+like|dislike|hate|can'?t\s+stand)\s+)(?P<item>.+)$"
 )
 
+if RX_I_LIKE.search(clause):
+    m = RX_I_LIKE.search(clause)
+    item = m.group("item").strip().rstrip(".!?")
+    print(f"[SemanticParser] LIKE detected → {item}")
+
 # ---------- Negation & reflective ----------
 RX_NEGATION = re.compile(r"(?i)^(?:no[, ]*|actually[, ]*)?\s*not\s+(?P<val>.+)$")
 RX_REFLECTIVE = re.compile(
