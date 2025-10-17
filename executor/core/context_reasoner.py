@@ -1,16 +1,17 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.12b — Tone inheritance & contextual reasoning
+Phase 2.12c — Adaptive personality & tone learning
 
 Adds:
-- Domain-based tone adaptation via domain_traits registry
-- Maintains reasoning, temporal recall, consent, and personality persistence
+- Integration with personality_adapter.learn_tone()
+- Automatically detects tone cues from user input (e.g. "be calm", "be tough")
+- Full persistence via session_context (tone column)
 """
 
 from __future__ import annotations
 import re
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from executor.utils import memory_graph as gmem
 from executor.utils.session_context import (
@@ -19,7 +20,7 @@ from executor.utils.session_context import (
     get_tone, set_tone,
 )
 from executor.utils.turn_memory import get_recent_turns
-from executor.utils.personality_adapter import style_response
+from executor.utils.personality_adapter import style_response, learn_tone
 from executor.utils.domain_traits import get_domain_tone
 
 
@@ -33,7 +34,16 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         tone = get_tone(session_id) if session_id else "neutral"
         last_dom, last_key = get_last_fact(session_id)
 
-        # --- Domain tone adaptation ---
+        # --- Detect explicit tone directives like "be calm", "be creative" ---
+        m_tone = re.search(r"(?i)\b(?:be|sound|act|respond|talk)\s+(?:more\s+)?([\w\s]+)$", q)
+        if m_tone:
+            new_tone = m_tone.group(1).strip(" .!?")
+            tone = learn_tone(session_id, new_tone)
+            intent["intent"] = "tone.update"
+            intent["reply"] = style_response(f"Okay — I'll be {new_tone} from now on.", tone=tone)
+            return intent
+
+        # --- Domain tone inheritance ---
         domain = intent.get("domain")
         if domain:
             tone_pref = get_domain_tone(domain)
@@ -51,15 +61,15 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         # --- Temporal recall intent ---
         if re.search(r"\b(what did i say|remind me what we talked)\b", q):
             turns = get_recent_turns(session_id=session_id, limit=8)
-            summary = "; ".join(
-                [t["content"] for t in turns if t["role"] == "user"]
-            )
+            summary = "; ".join([t["content"] for t in turns if t["role"] == "user"])
             intent["intent"] = "temporal.recall"
-            intent["reply"] = f"Here’s what we discussed recently: {summary}" if summary else \
-                "I don’t have any recent conversation to recall."
+            intent["reply"] = (
+                f"Here’s what we discussed recently: {summary}"
+                if summary else "I don’t have any recent conversation to recall."
+            )
             return intent
 
-        # --- Context reflection ---
+        # --- Tone self-awareness ---
         if re.search(r"\bhow would you describe your tone\b", q):
             tone_now = get_tone(session_id) or "neutral"
             intent["intent"] = "meta.query"
