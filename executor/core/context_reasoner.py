@@ -3,16 +3,16 @@ executor/core/context_reasoner.py
 ---------------------------------
 Reasoning layer that interprets context and relational inferences.
 
-2.13 patch:
-- Adds fuzzy normalization for queries like “cozy layouts”.
-- Integrates relationship_graph to surface associations.
+2.13b patch:
+- Adds fuzzy normalization for queries like “cozy layouts”
+- Integrates relationship_graph explanations
 """
 
 from __future__ import annotations
 import re
 from typing import Dict, Any, Optional
 from executor.utils import memory_graph as gmem
-from executor.utils.relationship_graph import related_for_item, normalize_term
+from executor.utils.relationship_graph import related_for_item, normalize_term, explain_relationship
 from executor.utils.preference_graph import get_preferences, get_dislikes
 from executor.utils.turn_memory import get_recent_turns
 
@@ -47,14 +47,18 @@ def reason_about_context(intent: Dict[str, Any], query: str,
             return {"intent": "food.query", "reply": reply.strip()}
         return {"intent": "food.query", "reply": "I don't have enough information about your food preferences yet."}
 
-    # Relational queries
+    # Relational queries with explanations
     if re.search(r"(?i)\bwhat\s+go(es)?\s+with\b", q):
         target = normalize_term(q.split("with")[-1])
         rels = related_for_item(target)
         if not rels:
             return {"intent": "relation.query", "reply": f"I don't yet have associations for {target}."}
-        tops = [f"{r['tgt_item']} ({r['tgt_domain']})" for r in rels]
-        return {"intent": "relation.query", "reply": f"{target.title()} goes well with {', '.join(tops)}."}
+        tops = []
+        for r in rels:
+            exp = explain_relationship(r["src_domain"], r["tgt_domain"])
+            tops.append(f"{r['tgt_item']} ({r['tgt_domain']}) {exp}")
+        joined = "; ".join(tops)
+        return {"intent": "relation.query", "reply": f"{target.title()} goes well with {joined}."}
 
     # Fallback smalltalk
     return {"intent": "smalltalk", "reply": None}
