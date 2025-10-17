@@ -1,6 +1,15 @@
-# executor/api/main.py — Phase 2.10a.1 (semantic parser + consent gate; delete confirmation)
+"""
+executor/api/main.py
+--------------------
+Phase 2.11.2 — preference query support + time-aware memory
+
+Adds:
+- preference.query handler (food/ui) reading from preferences table
+- keeps 2.11 personalized reasoning, turn logging, and persistence
+"""
+
 from __future__ import annotations
-import os, json, re
+import json, re
 from pathlib import Path
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Request
@@ -18,6 +27,10 @@ from executor.utils.session_context import (
 )
 from executor.utils.turn_memory import add_turn
 from executor.core.context_reasoner import reason_about_context, build_context_block
+from executor.core.reasoning import reason_about_goal
+from executor.utils.dialogue_templates import clarifying_line
+from executor.core.context_orchestrator import gather_design_context
+from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
@@ -38,6 +51,7 @@ _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "di
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
 
+
 class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
@@ -45,39 +59,20 @@ class ChatBody(BaseModel):
     session_id: str | None = None
     set_intimacy: int | None = None
 
+
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
+
 
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Echo API is running."}
 
+
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
 
-def _apply_update(intent: Dict[str, Any], session_id: str) -> Optional[str]:
-    domain = intent.get("domain")
-    key    = gmem.canonicalize_key(intent.get("key")) if intent.get("key") else None
-    scope  = intent.get("scope")
-    value  = sanitize_value(intent.get("value")) if intent.get("value") else None
-
-    if intent.get("intent") == "location.update" and key in ("home","current","trip") and value:
-        gmem.upsert_node("location", key, value, scope=key)
-        set_last_fact(session_id, "location", key)
-        return f"Got it — your {key} location is {value}."
-
-    if intent.get("intent") == "fact.update" and domain and key and value:
-        detected = gmem.detect_domain_from_key(key)
-        domain = detected or domain
-        if domain == "location" and key in ("home","current","trip"):
-            gmem.delete_node(domain, key, scope=key)
-            gmem.upsert_node(domain, key, value, scope=key)
-        else:
-            gmem.upsert_node(domain, key, value, scope="global")
-        set_last_fact(session_id, domain, key)
-        return f"Got it — your {key} is {value}."
-    return None
 
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
@@ -96,10 +91,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     add_turn("user", text, session_id=session_id)
 
-    # 1) Parse into (possibly multiple) intents
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # 1a) Topic setter (parser already emits smalltalk; we persist the label here)
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -111,9 +104,14 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     for p in parsed_intents:
         intent = reason_about_context(p, text, session_id=session_id)
 
-        # Consent gate for reflective items
+        # Consent gate
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
+            continue
+
+        # Temporal recall (reasoner can pre-fill a reply)
+        if intent.get("intent") == "temporal.recall" and intent.get("reply"):
+            replies.append(intent["reply"])
             continue
 
         # Location queries
@@ -128,7 +126,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, "location", intent["key"])
             continue
 
-        # Fact queries
+        # Fact queries (graph-backed)
         if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
@@ -137,14 +135,43 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # Preferences (ack only; Phase 2.11 will persist weighted prefs)
-        if intent["intent"] == "preference.statement" and intent.get("key"):
-            replies.append(f"Noted — you {('like' if intent.get('polarity')==1 else 'don’t like')} {intent['key']}.")
+        # Preference queries (preferences-backed)
+        if intent.get("intent") == "preference.query":
+            qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
+            # food / ui support now; others later
+            if qdom == "food":
+                likes = [p["item"] for p in get_preferences("food", min_strength=0.0) if p["polarity"] > 0]
+                dislikes = [p["item"] for p in get_dislikes("food")]
+                parts = []
+                if likes:
+                    parts.append(f"you love {', '.join(sorted(set(likes)))}")
+                if dislikes:
+                    parts.append(f"you don't like {', '.join(sorted(set(dislikes)))}")
+                replies.append("Based on what you've shared, " + " and ".join(parts) + ".")
+            elif qdom == "ui":
+                likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]
+                if likes:
+                    replies.append(f"You like these layout styles: {', '.join(sorted(set(likes)))}.")
+                else:
+                    replies.append("I don't have any saved layout preferences yet.")
+            else:
+                replies.append("I can check what you like if you tell me the category (e.g., foods, layouts).")
             continue
 
-        # Negation → delete confirmation
+        # Preferences (persist)
+        if intent["intent"] == "preference.statement" and intent.get("key"):
+            item = intent["key"]
+            polarity = +1 if intent.get("polarity") == 1 else -1
+            try:
+                domain = intent.get("domain") or gmem.detect_domain_from_key(item)
+                record_preference(domain, item, polarity=polarity, strength=0.8, source="parser")
+            except Exception as e:
+                print("[PreferenceWriteError]", e)
+            replies.append(f"Noted — you {('like' if polarity>0 else 'don’t like')} {item}.")
+            continue
+
+        # Negation deletes
         if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
-            # perform deletes across scopes for consistency with 2.9
             for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
                 gmem.delete_node(intent["domain"], intent["key"], sc)
             set_last_fact(session_id, intent["domain"], intent["key"])
@@ -152,12 +179,50 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             continue
 
         # Updates
-        write_reply = _apply_update(intent, session_id)
-        if write_reply:
-            replies.append(write_reply)
+        if intent.get("intent") == "fact.update" and intent.get("key") and intent.get("value"):
+            domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
+            val = sanitize_value(intent["value"])
+            gmem.upsert_node(domain, intent["key"], val, scope="global")
+            set_last_fact(session_id, domain, intent["key"])
+            replies.append(f"Got it — your {intent['key']} is {val}.")
+            continue
 
+        # Goal or project request → reasoning + context
+        if intent.get("intent") in ("goal.statement", "project.request"):
+            frame = reason_about_goal(text, session_id=session_id)
+            context = gather_design_context(frame.get("goal"), session_id=session_id)
+            frame["context"] = context
+
+            ui_palette = context["ui_prefs"].get("palette")
+            shape = context["ui_prefs"].get("shape_pref")
+            food_likes = context["domain_prefs"].get("food", {}).get("likes", [])
+            hint_parts = []
+            if ui_palette:
+                hint_parts.append(f"I’ll use your {ui_palette} palette")
+            if shape:
+                hint_parts.append(f"and keep the {shape} style")
+            if food_likes:
+                hint_parts.append(f"and remember you like {', '.join(food_likes[:2])}")
+            hint = " ".join(hint_parts).strip()
+            q = clarifying_line(frame["next_question"])
+            replies.append(f"{hint}. {q}" if hint else q)
+            continue
+
+    # Heuristic goal detection if nothing routed (same as 2.11)
+    GOAL_RX = re.compile(
+        r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
+        r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
+    )
+    if not replies and GOAL_RX.search(text):
+        frame = reason_about_goal(text, session_id=session_id)
+        context = gather_design_context(frame.get("goal"), session_id=session_id)
+        ui_palette = context["ui_prefs"].get("palette")
+        hint = f"I’ll use your {ui_palette} palette. " if ui_palette else ""
+        q = clarifying_line(frame["next_question"])
+        replies.append(f"{hint}{q}")
+
+    # Router / brain fallback (unchanged)
     if not replies:
-        # router/brain fallback
         try:
             router_output = route(text)
         except Exception as e:
@@ -171,7 +236,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 reply = brain_chat(context_block)
             except Exception as e:
                 reply = f"(brain offline) {e}"
-
             try:
                 add_turn("assistant", reply, session_id)
                 remember_exchange("user", text)
@@ -183,7 +247,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # plugin dispatch
+        # plugin dispatch ...
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:

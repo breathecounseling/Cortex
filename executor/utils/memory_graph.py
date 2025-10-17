@@ -1,12 +1,7 @@
 """
 executor/utils/memory_graph.py
 ------------------------------
-Phase 2.10a.7 — full stable release.
-
-Includes:
-- CRUD + helpers (unchanged from 2.9)
-- canonicalize_key(), contains_negation(), extract_topic_intro()
-- corrected detect_domain_from_key() for “favorite food” etc.
+Phase 2.11.1 — domain detection expanded for UI/food terms; full stable CRUD.
 """
 
 from __future__ import annotations
@@ -41,7 +36,7 @@ def init_graph() -> None:
     c.execute("CREATE INDEX IF NOT EXISTS idx_nodes_dks ON graph_nodes(domain,nkey,scope)")
     conn.commit(); conn.close()
 
-def _now() -> int:
+def _now() -> int: 
     return int(time.time())
 
 def _safe_json(obj: Any) -> str:
@@ -71,10 +66,6 @@ def _row_to_node(row: Tuple) -> Dict[str, Any]:
 # KEY NORMALIZATION
 # ---------------------------------------------------------------------
 def canonicalize_key(key: str) -> str:
-    """
-    Normalize a fact key so different phrasings map to the same memory slot.
-    Example: 'Favorite Color', 'favorite color?' -> 'favorite color'
-    """
     if not key:
         return ""
     cleaned = re.sub(r"[^\w\s]", "", key).strip().lower()
@@ -86,7 +77,6 @@ def canonicalize_key(key: str) -> str:
 # ---------------------------------------------------------------------
 def upsert_node(domain: str, key: str, value: str, scope: str = "global",
                 meta: Optional[Dict[str, Any]] = None) -> int:
-    """Insert or overwrite node by (domain,key,scope)."""
     init_graph()
     conn = _connect(); c = conn.cursor()
     ts = _now()
@@ -128,27 +118,56 @@ _DOMAIN_SCOPES = {
     "location": ["home", "current", "trip", "global"],
     "color": ["global"],
     "food": ["global"],
+    "ui": ["global"],
 }
 
 def get_all_scopes_for_domain(domain: str) -> List[str]:
-    """Return known scopes for a domain."""
     return _DOMAIN_SCOPES.get(domain, ["global"])
 
 # ---------------------------------------------------------------------
-# AUTO-EXTENSIBLE DOMAIN DETECTION
+# AUTO-EXTENSIBLE DOMAIN DETECTION (expanded for UI/food)
 # ---------------------------------------------------------------------
 def detect_domain_from_key(key: str) -> str:
     """
     Infer or create a domain name dynamically from a fact key.
-    Adjusted to prevent over-aggressive truncation.
+    Expanded rules so UI/layout/chart terms map to 'ui';
+    single-ingredient nouns map to 'food'.
     """
-    k = key.lower().strip()
-    if "color" in k: return "color"
-    if "food" in k or "favorite food" in k: return "food"
-    if "location" in k or "home" in k or "trip" in k: return "location"
-    if "movie" in k or "film" in k: return "movie"
-    if "song" in k or "music" in k: return "music"
-    if "project" in k: return "project"
+    k = (key or "").lower().strip()
+
+    # --- Food keywords (single items & cuisines) ---
+    if any(word in k for word in [
+        "food","cuisine","dish","meal",
+        "seafood","broccoli","pasta","sushi",
+        "pizza","oyster","oysters","gumbo","liver","anchovy","anchovies",
+        "ramen","curry","taco","tacos","noodle","noodles"
+    ]):
+        return "food"
+
+    # --- Color & palette ---
+    if "color" in k or ("earth" in k and "tone" in k):
+        return "color"
+
+    # --- Location ---
+    if "location" in k or "home" in k or "trip" in k or "city" in k:
+        return "location"
+
+    # --- Media/Project ---
+    if "movie" in k or "film" in k:
+        return "movie"
+    if "song" in k or "music" in k:
+        return "music"
+    if "project" in k:
+        return "project"
+
+    # --- UI / visual language ---
+    if any(token in k for token in [
+        "ui","layout","palette","theme","rounded","corner",
+        "donut","chart","charts","dashboard","typography","density","font"
+    ]):
+        return "ui"
+
+    # fallback heuristic
     words = k.split()
     dom = "misc"
     if words:
@@ -159,28 +178,19 @@ def detect_domain_from_key(key: str) -> str:
     return dom or "misc"
 
 # ---------------------------------------------------------------------
-# NEGATION DETECTION (used by context_reasoner)
+# NEGATION & TOPIC HELPERS
 # ---------------------------------------------------------------------
 def contains_negation(text: str) -> bool:
-    """Detect simple negation phrases in text."""
     if not text:
         return False
     return bool(re.search(r"\b(not|no|never|nevermind)\b", text.lower()))
 
-# ---------------------------------------------------------------------
-# TOPIC EXTRACTION (used by context_reasoner)
-# ---------------------------------------------------------------------
 def extract_topic_intro(text: str) -> Optional[str]:
-    """
-    Detects explicit topic-introduction phrases such as
-    'let's talk about X' or 'switch to X'.
-    """
     if not text:
         return None
     m = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)", text.strip())
     if m:
-        topic = m.group(2).strip(" .!?")
-        return topic
+        return m.group(2).strip(" .!?")
     return None
 
 # ---------------------------------------------------------------------
@@ -224,25 +234,22 @@ def answer_location_question(text: str) -> Optional[str]:
     return None
 
 # ---------------------------------------------------------------------
-# FACT / COLOR / FOOD / MISC
+# FACTS
 # ---------------------------------------------------------------------
 _FACT_DECL_RX = re.compile(r"\bmy\s+(?P<key>[\w\s]+?)\s+(?:is|was|=|'s)\s+(?P<val>[^.?!]+)", re.I)
 _CHANGE_RX = re.compile(r"\b(i\s+changed\s+my\s+mind\s+about|no,\s*it's|actually\s+it's)\s+(?P<key>[\w\s]+)", re.I)
 
 def extract_and_save_fact(text: str) -> Optional[str]:
-    """Detect fact statements and route them to appropriate or new domain."""
     m = _FACT_DECL_RX.search(text or "")
     if not m:
         return None
     key = m.group("key").strip().lower()
     val = m.group("val").strip().rstrip(".!?")
     dom = detect_domain_from_key(key)
-    scope = "global"
-    upsert_node(dom, key, val, scope=scope)
+    upsert_node(dom, key, val, scope="global")
     return f"Got it — your {key} is {val}."
 
 def forget_fact_or_location(text: str) -> Optional[str]:
-    """Forget logic per domain."""
     t = (text or "").lower().strip()
     m = _CHANGE_RX.search(t)
     if m:
