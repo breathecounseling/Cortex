@@ -1,109 +1,154 @@
 """
 executor/utils/session_context.py
 ---------------------------------
-Persistent session context helpers for Echo:
-- last fact (domain, key)
-- last topic (topic string)
-- intimacy level (0..3) for consent-gated reflective prompts
-
-Includes auto-migration for legacy DBs.
+Session context management for Echo.
+Handles topic, intimacy, and conversational tone (personality state).
+Includes auto-migration for missing columns such as `tone`.
 """
 
-from __future__ import annotations
-import sqlite3, time
+import sqlite3
 from pathlib import Path
-from typing import Optional, Tuple
 
-DB_PATH = Path("/data") / "memory.db"
+DB_PATH = Path("/data/memory.db")
 
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH.as_posix(), check_same_thread=False)
+# ---------------------- Database helpers ----------------------
 
-def _has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table})")
-    return any(row[1] == col for row in cur.fetchall())
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def _init() -> None:
-    conn = _connect(); c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS session_context(
-            session_id TEXT PRIMARY KEY,
-            last_domain TEXT,
-            last_key TEXT,
-            last_topic TEXT,
-            intimacy_level INTEGER DEFAULT 0,
-            updated_at INTEGER
+
+def ensure_tables():
+    """Ensure the session_context table exists."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_context (
+                session_id TEXT PRIMARY KEY,
+                last_topic TEXT,
+                intimacy_level INTEGER DEFAULT 0,
+                tone TEXT DEFAULT 'neutral'
+            );
+            """
         )
-    """)
-    # migrations for legacy dbs
-    if not _has_column(conn, "session_context", "last_topic"):
-        try: c.execute("ALTER TABLE session_context ADD COLUMN last_topic TEXT")
-        except sqlite3.OperationalError: pass
-    if not _has_column(conn, "session_context", "intimacy_level"):
-        try: c.execute("ALTER TABLE session_context ADD COLUMN intimacy_level INTEGER DEFAULT 0")
-        except sqlite3.OperationalError: pass
-    conn.commit(); conn.close()
+        conn.commit()
 
-def set_last_fact(session_id: str, domain: str, key: str) -> None:
-    _init()
-    conn = _connect(); c = conn.cursor()
-    ts = int(time.time())
-    c.execute("""
-        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,intimacy_level,updated_at)
-        VALUES(?,?,?,?,?,?)
-        ON CONFLICT(session_id)
-        DO UPDATE SET last_domain=excluded.last_domain,
-                      last_key=excluded.last_key,
-                      updated_at=excluded.updated_at
-    """, (session_id, domain, key, None, None, ts))
-    conn.commit(); conn.close()
 
-def get_last_fact(session_id: str) -> Tuple[Optional[str], Optional[str]]:
-    _init()
-    conn = _connect(); c = conn.cursor()
-    c.execute("SELECT last_domain,last_key FROM session_context WHERE session_id=? LIMIT 1", (session_id,))
-    row = c.fetchone(); conn.close()
-    return (row[0], row[1]) if row else (None, None)
+def ensure_tone_column():
+    """
+    Auto-migration: if the session_context table is missing the `tone` column,
+    add it without dropping existing data.
+    """
+    with get_conn() as conn:
+        cur = conn.execute("PRAGMA table_info(session_context)")
+        columns = [row["name"] for row in cur.fetchall()]
+        if "tone" not in columns:
+            print("[SessionContext] Adding missing `tone` column …")
+            conn.execute("ALTER TABLE session_context ADD COLUMN tone TEXT DEFAULT 'neutral';")
+            conn.commit()
 
-def set_topic(session_id: str, topic: str) -> None:
-    _init()
-    conn = _connect(); c = conn.cursor()
-    ts = int(time.time())
-    c.execute("""
-        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,intimacy_level,updated_at)
-        VALUES(?,?,?,?,?,?)
-        ON CONFLICT(session_id)
-        DO UPDATE SET last_topic=excluded.last_topic,
-                      updated_at=excluded.updated_at
-    """, (session_id, None, None, topic.strip(), None, ts))
-    conn.commit(); conn.close()
 
-def get_topic(session_id: str) -> Optional[str]:
-    _init()
-    conn = _connect(); c = conn.cursor()
-    c.execute("SELECT last_topic FROM session_context WHERE session_id=? LIMIT 1", (session_id,))
-    row = c.fetchone(); conn.close()
-    return row[0] if row and row[0] else None
+# Ensure the DB and tone column exist at import time
+ensure_tables()
+ensure_tone_column()
 
-def set_intimacy(session_id: str, level: int) -> None:
-    """level: 0 basic, 1 conversational, 2 reflective, 3 deep/therapeutic (requires explicit consent)"""
-    _init()
-    level = max(0, min(3, int(level)))
-    conn = _connect(); c = conn.cursor()
-    ts = int(time.time())
-    c.execute("""
-        INSERT INTO session_context(session_id,last_domain,last_key,last_topic,intimacy_level,updated_at)
-        VALUES(?,?,?,?,?,?)
-        ON CONFLICT(session_id)
-        DO UPDATE SET intimacy_level=excluded.intimacy_level,
-                      updated_at=excluded.updated_at
-    """, (session_id, None, None, None, level, ts))
-    conn.commit(); conn.close()
+
+# ---------------------- Context operations ----------------------
+
+def set_last_fact(session_id: str, domain: str, key: str):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_context (session_id, last_topic)
+            VALUES (?, ?)
+            ON CONFLICT(session_id)
+            DO UPDATE SET last_topic=excluded.last_topic;
+            """,
+            (session_id, f"{domain}.{key}"),
+        )
+        conn.commit()
+
+
+def get_last_fact(session_id: str):
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT last_topic FROM session_context WHERE session_id=?", (session_id,)
+        )
+        row = cur.fetchone()
+        if not row or not row["last_topic"]:
+            return None, None
+        parts = row["last_topic"].split(".", 1)
+        return (parts[0], parts[1]) if len(parts) == 2 else (None, None)
+
+
+def set_topic(session_id: str, topic: str):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_context (session_id, last_topic)
+            VALUES (?, ?)
+            ON CONFLICT(session_id)
+            DO UPDATE SET last_topic=excluded.last_topic;
+            """,
+            (session_id, topic),
+        )
+        conn.commit()
+
+
+def get_topic(session_id: str):
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT last_topic FROM session_context WHERE session_id=?", (session_id,)
+        )
+        row = cur.fetchone()
+        return row["last_topic"] if row else None
+
+
+def set_intimacy(session_id: str, level: int):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_context (session_id, intimacy_level)
+            VALUES (?, ?)
+            ON CONFLICT(session_id)
+            DO UPDATE SET intimacy_level=excluded.intimacy_level;
+            """,
+            (session_id, level),
+        )
+        conn.commit()
+
 
 def get_intimacy(session_id: str) -> int:
-    _init()
-    conn = _connect(); c = conn.cursor()
-    c.execute("SELECT intimacy_level FROM session_context WHERE session_id=? LIMIT 1", (session_id,))
-    row = c.fetchone(); conn.close()
-    return int(row[0]) if row and row[0] is not None else 0
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT intimacy_level FROM session_context WHERE session_id=?",
+            (session_id,),
+        )
+        row = cur.fetchone()
+        return int(row["intimacy_level"]) if row else 0
+
+
+# ---------------------- Tone / personality ----------------------
+
+def set_tone(session_id: str, tone: str):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO session_context (session_id, tone)
+            VALUES (?, ?)
+            ON CONFLICT(session_id)
+            DO UPDATE SET tone=excluded.tone;
+            """,
+            (session_id, tone),
+        )
+        conn.commit()
+
+
+def get_tone(session_id: str) -> str:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT tone FROM session_context WHERE session_id=?", (session_id,)
+        )
+        row = cur.fetchone()
+        return row["tone"] if row and row["tone"] else "neutral"

@@ -1,12 +1,8 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.12d — Contextual inference integration (stable)
-
-Fixes:
-- Prevents KeyError: 'intent' when reasoner returns direct replies.
-- Preserves preference, goal, and orchestration logic.
-- Cleans up flow control for safe reasoning fallback.
+Phase 2.13d — Natural-Language Tone/Personality Integration
++ Fix for reason_about_context() call (removed unsupported tone argument)
 """
 
 from __future__ import annotations
@@ -18,6 +14,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# --- Core imports ---
 from executor.utils.sanitizer import sanitize_value
 from executor.utils import memory_graph as gmem
 from executor.core.semantic_parser import parse_message
@@ -34,12 +31,15 @@ from executor.core.context_orchestrator import gather_design_context
 from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
 from executor.core.inference_engine import infer_contextual_preferences
 
+# --- Plugins and brain ---
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 from executor.ai.router import chat as brain_chat
+
+# --- Memory systems ---
 from executor.utils.memory import (
     init_db_if_needed, recall_context, remember_exchange,
     save_fact, list_facts, update_or_delete_from_text
@@ -49,6 +49,10 @@ from executor.utils.vector_memory import (
     retrieve_topic_summaries, hierarchical_recall
 )
 
+
+# ------------------------------------------------------------
+# FastAPI setup
+# ------------------------------------------------------------
 app = FastAPI()
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
@@ -79,7 +83,7 @@ def health():
 
 @app.get("/refresh_inference")
 def refresh_inference():
-    """Triggers inference engine to compute implicit preferences."""
+    """Triggers the inference engine to compute implicit preferences."""
     data = infer_contextual_preferences()
     return {"status": "ok", "inferred": len(data)}
 
@@ -103,7 +107,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # Detect topic switches
+    # --- Topic detection ---
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -113,28 +117,19 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     replies: list[str] = []
 
     for p in parsed_intents:
-        intent = reason_about_context(p, text, session_id=session_id)
+        intent = reason_about_context(p, text, session_id=session_id)  # fixed call
 
-        # --- Guard: reasoner direct replies without 'intent' key ---
-        if not isinstance(intent, dict) or "intent" not in intent:
-            if isinstance(intent, dict) and "reply" in intent:
-                replies.append(intent["reply"])
-                continue
-            else:
-                replies.append("I’m not sure how to handle that request right now.")
-                continue
-
-        # Consent gate / reflective
+        # --- Consent gate / reflective ---
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
 
-        # Temporal recall (reasoner may pre-fill reply)
+        # --- Temporal recall ---
         if intent.get("intent") == "temporal.recall" and intent.get("reply"):
             replies.append(intent["reply"])
             continue
 
-        # Location queries
+        # --- Location queries ---
         if intent["intent"] == "location.query" and intent.get("scope") and intent.get("key"):
             node = gmem.get_node("location", intent["key"], scope=intent["scope"])
             if intent["key"] == "home":
@@ -146,7 +141,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, "location", intent["key"])
             continue
 
-        # Fact queries (graph)
+        # --- Fact queries ---
         if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
@@ -155,7 +150,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # Preference queries
+        # --- Preference queries ---
         if intent.get("intent") == "preference.query":
             qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
             if qdom == "food":
@@ -177,7 +172,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 replies.append("I can check what you like if you tell me the category (e.g., foods, layouts).")
             continue
 
-        # Preferences (persist)
+        # --- Preferences (persist) ---
         if intent["intent"] == "preference.statement" and intent.get("key"):
             item = intent["key"]
             polarity = +1 if intent.get("polarity") == 1 else -1
@@ -186,10 +181,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 record_preference(domain, item, polarity=polarity, strength=0.8, source="parser")
             except Exception as e:
                 print("[PreferenceWriteError]", e)
-            replies.append(f"Noted — you {('like' if polarity>0 else 'don’t like')} {item}.")
+            replies.append(f"Noted — you {('like' if polarity > 0 else 'don’t like')} {item}.")
             continue
 
-        # Negation deletes
+        # --- Negation deletes ---
         if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
             for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
                 gmem.delete_node(intent["domain"], intent["key"], sc)
@@ -197,7 +192,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"Okay — I’ve cleared your {intent['key']}. What should it be now?")
             continue
 
-        # Updates
+        # --- Fact updates ---
         if intent.get("intent") == "fact.update" and intent.get("key") and intent.get("value"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             val = sanitize_value(intent["value"])
@@ -206,7 +201,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"Got it — your {intent['key']} is {val}.")
             continue
 
-        # Goal or project request → reasoning + design context
+        # --- Goal or project request ---
         if intent.get("intent") in ("goal.statement", "project.request"):
             frame = reason_about_goal(text, session_id=session_id)
             context = gather_design_context(frame.get("goal"), session_id=session_id)
@@ -227,7 +222,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"{hint}. {q}" if hint else q)
             continue
 
-    # Heuristic goal detection if nothing routed
+    # --- Goal detection fallback ---
     GOAL_RX = re.compile(
         r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
         r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
@@ -240,7 +235,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         q = clarifying_line(frame["next_question"])
         replies.append(f"{hint}{q}")
 
-    # Router / brain fallback (unchanged)
+    # --- Router / LLM fallback ---
     if not replies:
         try:
             router_output = route(text)
@@ -266,7 +261,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # Plugin dispatch...
+        # --- Plugin dispatch ---
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:

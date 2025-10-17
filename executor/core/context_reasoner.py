@@ -1,130 +1,125 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.12d — Context Reasoner (cosmetic deduplication, grammar fixes, and
-robust input normalization for main.py integration).
+Phase 2.12c — Adaptive personality & tone learning
 
-- Handles dict or string input for backward compatibility.
-- Deduplicates similar entries and formats natural lists.
-- Merges explicit + inferred preferences.
+Adds:
+- Integration with personality_adapter.learn_tone()
+- Automatically detects tone cues from user input (e.g. "be calm", "be tough")
+- Full persistence via session_context (tone column)
 """
 
 from __future__ import annotations
 import re
-from itertools import groupby
-from typing import Any, Dict, List, Optional
+from typing import Dict, Any, Optional
 
-from executor.utils.preference_graph import get_preferences, get_dislikes
-from executor.utils.inference_graph import list_inferred_preferences
-
-
-# ---------------------------------------------------------------------
-# Cosmetic helpers
-# ---------------------------------------------------------------------
-def _deduplicate_and_pretty(items: List[str]) -> str:
-    """
-    Remove near-duplicate items (case-insensitive, trimmed)
-    and return a grammatically clean string like "A, B, and C".
-    """
-    norm = [re.sub(r"\s+", " ", i.strip().lower()) for i in items if i.strip()]
-    norm = [k for k, _ in groupby(sorted(norm))]
-    if not norm:
-        return ""
-    if len(norm) == 1:
-        return norm[0]
-    if len(norm) == 2:
-        return f"{norm[0]} and {norm[1]}"
-    return ", ".join(norm[:-1]) + f", and {norm[-1]}"
+from executor.utils import memory_graph as gmem
+from executor.utils.session_context import (
+    get_last_fact, set_last_fact,
+    get_topic, set_topic,
+    get_tone, set_tone,
+)
+from executor.utils.turn_memory import get_recent_turns
+from executor.utils.personality_adapter import style_response, learn_tone
+from executor.utils.domain_traits import get_domain_tone
 
 
-# ---------------------------------------------------------------------
-# Core reasoning
-# ---------------------------------------------------------------------
-def reason_about_context(
-    query: str | dict,
-    *_args,
-    session_id: Optional[str] = None,
-    **_kwargs,
-) -> Dict[str, Any]:
-    """
-    Simplified context reasoner:
-    merges explicit + inferred preferences and returns human-readable text.
-    Accepts dict or string input for backward compatibility.
-    """
+# ---------- Core Reasoning ----------
+def reason_about_context(intent: Dict[str, Any], query: str,
+                         session_id: Optional[str] = None) -> Dict[str, Any]:
+    """Interpret parsed intent with awareness of session, tone, and topic."""
+    try:
+        q = (query or "").strip().lower()
+        topic = get_topic(session_id)
+        tone = get_tone(session_id) if session_id else "neutral"
+        last_dom, last_key = get_last_fact(session_id)
 
-    # --- Normalize query safely ---
-    if isinstance(query, dict):
-        query = query.get("text") or query.get("query") or str(query)
-    q = (query or "").lower().strip()
+        # --- Detect explicit tone directives like "be calm", "be creative" ---
+        m_tone = re.search(r"(?i)\b(?:be|sound|act|respond|talk)\s+(?:more\s+)?([\w\s]+)$", q)
+        if m_tone:
+            new_tone = m_tone.group(1).strip(" .!?")
+            tone = learn_tone(session_id, new_tone)
+            intent["intent"] = "tone.update"
+            intent["reply"] = style_response(f"Okay — I'll be {new_tone} from now on.", tone=tone)
+            return intent
 
-    prefs = get_preferences()
-    inferred = list_inferred_preferences()
+        # --- Domain tone inheritance ---
+        domain = intent.get("domain")
+        if domain:
+            tone_pref = get_domain_tone(domain)
+            if tone_pref and tone_pref != "neutral":
+                print(f"[ToneAdapt] Switching to domain tone: {tone_pref} ({domain})")
+                set_tone(session_id, tone_pref)
+                tone = tone_pref
 
-    # Determine domain of interest from query
-    if any(k in q for k in ["layout", "ui", "interface", "design"]):
-        dom = "ui"
-        title = "layout styles"
-    elif any(k in q for k in ["food", "eat", "dish"]):
-        dom = "food"
-        title = "foods"
-    elif any(k in q for k in ["color", "palette", "hue", "shade"]):
-        dom = "color"
-        title = "colors"
-    else:
-        dom = None
-        title = "things"
+        # --- Negation inference ---
+        if re.match(r"(?i)\bno\b|not\b|none\b|never\b", q):
+            intent["intent"] = "fact.delete"
+            intent["reply"] = "Okay — I’ve cleared that for you."
+            return intent
 
-    # Collect preferences
-    likes = [
-        p["item"]
-        for p in prefs
-        if p["polarity"] > 0 and (dom is None or p["domain"] == dom)
+        # --- Temporal recall intent ---
+        if re.search(r"\b(what did i say|remind me what we talked)\b", q):
+            turns = get_recent_turns(session_id=session_id, limit=8)
+            summary = "; ".join([t["content"] for t in turns if t["role"] == "user"])
+            intent["intent"] = "temporal.recall"
+            intent["reply"] = (
+                f"Here’s what we discussed recently: {summary}"
+                if summary else "I don’t have any recent conversation to recall."
+            )
+            return intent
+
+        # --- Tone self-awareness ---
+        if re.search(r"\bhow would you describe your tone\b", q):
+            tone_now = get_tone(session_id) or "neutral"
+            intent["intent"] = "meta.query"
+            intent["reply"] = style_response(
+                f"I would describe my tone as {tone_now}.",
+                tone=tone_now
+            )
+            return intent
+
+        # --- Contextual smalltalk fallback ---
+        if intent.get("intent") == "smalltalk":
+            reply = style_response("I'm here with you.", tone=tone)
+            intent["reply"] = reply
+            return intent
+
+        # --- Fact correction & follow-through ---
+        if intent.get("intent") == "fact.update" and not intent.get("domain"):
+            if last_dom:
+                intent["domain"] = last_dom
+            if last_key and not intent.get("key"):
+                intent["key"] = last_key
+
+        # --- Topic memory integration ---
+        if "topic" in q and not topic and last_dom:
+            set_topic(session_id, last_dom)
+
+        intent["tone"] = tone
+        return intent
+
+    except Exception as e:
+        print("[ContextReasonerError]", e)
+        intent["intent"] = "error"
+        intent["reply"] = f"(internal reasoning error: {e})"
+        return intent
+
+
+# ---------- Context Builder ----------
+def build_context_block(query: str, session_id: Optional[str] = None) -> str:
+    """Construct a synthetic prompt for the reasoning model."""
+    topic = get_topic(session_id)
+    tone = get_tone(session_id) if session_id else "neutral"
+    turns = get_recent_turns(session_id=session_id, limit=6)
+    recent_dialogue = "\n".join(
+        [f"{t['role']}: {t['content']}" for t in turns]
+    )
+
+    context_parts = [
+        f"Active tone: {tone}.",
+        f"Current topic: {topic or 'general conversation'}.",
+        f"Recent dialogue:\n{recent_dialogue}",
+        f"Current query: {query.strip()}",
     ]
-    dislikes = [
-        p["item"]
-        for p in prefs
-        if p["polarity"] < 0 and (dom is None or p["domain"] == dom)
-    ]
-
-    # Add inferred ones
-    likes += [
-        p["item"]
-        for p in inferred
-        if p["polarity"] >= 0 and (dom is None or p["domain"] == dom)
-    ]
-    dislikes += [
-        p["item"]
-        for p in inferred
-        if p["polarity"] < 0 and (dom is None or p["domain"] == dom)
-    ]
-
-    # Deduplicate + prettify
-    like_str = _deduplicate_and_pretty(likes)
-    dislike_str = _deduplicate_and_pretty(dislikes)
-
-    # Build reply
-    if not like_str and not dislike_str:
-        reply = f"I don’t have any {title} preferences stored yet."
-    elif like_str and not dislike_str:
-        reply = f"You like these {title}: {like_str}."
-    elif dislike_str and not like_str:
-        reply = f"You don’t like these {title}: {dislike_str}."
-    else:
-        reply = (
-            f"You like these {title}: {like_str}. "
-            f"And you don’t like {dislike_str}."
-        )
-
-    print(f"[ContextReasoner] Generated reply → {reply}")
-    return {"reply": reply}
-
-
-# ---------------------------------------------------------------------
-# Legacy stub for backward compatibility
-# ---------------------------------------------------------------------
-def build_context_block(*args, **kwargs):
-    """
-    Legacy placeholder for backward compatibility.
-    No longer used in Phase 2.12+, kept to satisfy old imports.
-    """
-    return {"context": "deprecated"}
+    return "\n".join(context_parts)
