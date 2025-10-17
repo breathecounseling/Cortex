@@ -1,22 +1,20 @@
 """
 executor/core/inference_engine.py
 ---------------------------------
-Phase 2.15 — Adds Next Best Action (NBA) ranking.
-
-- suggest_next_goal(session_id): ranks open + inferred candidates
-- infer_related_goals(session_id): tiny heuristic for missing steps
+Phase 2.15 — Next Best Action (NBA) ranking and inferred goal suggestions.
 """
 
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
 import datetime
-from executor.utils.goals import get_open_goals
+from executor.utils.goals import get_open_goals, list_sessions
 
 # --- tiny helper to normalize effort ---
 _EFFORT_SCORE = {"small": 2, "medium": 1, "large": 0}
 
 def _deadline_weight(deadline_str: Optional[str]) -> int:
-    if not deadline_str: return 0
+    if not deadline_str:
+        return 0
     try:
         import dateutil.parser as dp
         d = dp.parse(deadline_str, fuzzy=True).date()
@@ -34,7 +32,6 @@ def _score_goal(g: Dict[str, Any]) -> int:
     deadline_score = _deadline_weight(g.get("deadline"))
     return priority_score + effort_score + deadline_score
 
-# --- placeholder inferred suggestions (can expand later) ---
 def infer_related_goals(session_id: str) -> List[Dict[str, Any]]:
     """
     Heuristic: if a goal looks like 'write ad copy' and there is no landing page/email follow-up,
@@ -70,3 +67,13 @@ def suggest_next_goal(session_id: str) -> Optional[Dict[str, Any]]:
     top = ranked[0]
     msg = f"Would you like to work on “{top['title']}” next? It looks like a solid quick win."
     return {"intent": "goal.suggest", "reply": msg, "candidate": top}
+
+# --- backward-compat stub ---
+def infer_contextual_preferences() -> list[dict[str, Any]]:
+    """Backward-compatibility stub for old API routes."""
+    results: list[dict[str, Any]] = []
+    for sid in list_sessions():
+        nba = suggest_next_goal(sid)
+        if nba:
+            results.append(nba)
+    return results
