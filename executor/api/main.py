@@ -1,11 +1,11 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.11.2 — preference query support + time-aware memory
+Phase 2.12 — Contextual inference integration
 
 Adds:
-- preference.query handler (food/ui) reading from preferences table
-- keeps 2.11 personalized reasoning, turn logging, and persistence
+- /refresh_inference route to populate inferred preferences.
+- Existing 2.11 chat loop, preference, temporal recall, and orchestration preserved.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ from executor.core.reasoning import reason_about_goal
 from executor.utils.dialogue_templates import clarifying_line
 from executor.core.context_orchestrator import gather_design_context
 from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
+from executor.core.inference_engine import infer_contextual_preferences
+
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
@@ -74,6 +76,16 @@ def health():
     return JSONResponse({"status": "ok"})
 
 
+@app.get("/refresh_inference")
+def refresh_inference():
+    """
+    Triggers the inference engine to compute implicit preferences
+    from explicit ones and store them persistently.
+    """
+    data = infer_contextual_preferences()
+    return {"status": "ok", "inferred": len(data)}
+
+
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
@@ -104,12 +116,12 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     for p in parsed_intents:
         intent = reason_about_context(p, text, session_id=session_id)
 
-        # Consent gate
+        # Consent gate / reflective
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
 
-        # Temporal recall (reasoner can pre-fill a reply)
+        # Temporal recall (reasoner may pre-fill reply)
         if intent.get("intent") == "temporal.recall" and intent.get("reply"):
             replies.append(intent["reply"])
             continue
@@ -126,7 +138,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, "location", intent["key"])
             continue
 
-        # Fact queries (graph-backed)
+        # Fact queries (graph)
         if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
@@ -135,12 +147,11 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # Preference queries (preferences-backed)
+        # Preference queries (preferences)
         if intent.get("intent") == "preference.query":
             qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
-            # food / ui support now; others later
             if qdom == "food":
-                likes = [p["item"] for p in get_preferences("food", min_strength=0.0) if p["polarity"] > 0]
+                likes = [p["item"] for p in get_preferences("food", min_strength=0.0) if p["polarity"] > 0]  # type: ignore
                 dislikes = [p["item"] for p in get_dislikes("food")]
                 parts = []
                 if likes:
@@ -149,7 +160,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                     parts.append(f"you don't like {', '.join(sorted(set(dislikes)))}")
                 replies.append("Based on what you've shared, " + " and ".join(parts) + ".")
             elif qdom == "ui":
-                likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]
+                likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]  # type: ignore
                 if likes:
                     replies.append(f"You like these layout styles: {', '.join(sorted(set(likes)))}.")
                 else:
@@ -187,7 +198,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"Got it — your {intent['key']} is {val}.")
             continue
 
-        # Goal or project request → reasoning + context
+        # Goal or project request → reasoning + design context
         if intent.get("intent") in ("goal.statement", "project.request"):
             frame = reason_about_goal(text, session_id=session_id)
             context = gather_design_context(frame.get("goal"), session_id=session_id)
@@ -208,7 +219,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"{hint}. {q}" if hint else q)
             continue
 
-    # Heuristic goal detection if nothing routed (same as 2.11)
+    # Heuristic goal detection if nothing routed
     GOAL_RX = re.compile(
         r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
         r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
@@ -247,7 +258,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # plugin dispatch ...
+        # Plugin dispatch...
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:
