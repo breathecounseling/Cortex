@@ -15,7 +15,7 @@ from executor.utils.goals import (
 )
 from executor.utils.goal_resume import build_resume_prompt
 
-NUDGE_SILENCE_S = 15 * 60
+NUDGE_SILENCE_S = 15
 def _now() -> int: return int(time.time())
 
 def _should_nudge(goal: Dict, query: str) -> bool:
