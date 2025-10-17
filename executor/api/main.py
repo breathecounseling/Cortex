@@ -1,12 +1,10 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.12d — Contextual inference integration (stable)
+Phase 2.13 — Relational reasoning integration
 
-Fixes:
-- Prevents KeyError: 'intent' when reasoner returns direct replies.
-- Preserves preference, goal, and orchestration logic.
-- Cleans up flow control for safe reasoning fallback.
+- Adds /relations?q=... endpoint to inspect associations
+- Heuristic in chat for "what goes with X" routed to reasoner
 """
 
 from __future__ import annotations
@@ -33,6 +31,7 @@ from executor.utils.dialogue_templates import clarifying_line
 from executor.core.context_orchestrator import gather_design_context
 from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
 from executor.core.inference_engine import infer_contextual_preferences
+from executor.utils.relationship_graph import list_relations, related_for_item
 
 from executor.core.router import route
 from executor.plugins.web_search import web_search
@@ -79,9 +78,20 @@ def health():
 
 @app.get("/refresh_inference")
 def refresh_inference():
-    """Triggers inference engine to compute implicit preferences."""
     data = infer_contextual_preferences()
     return {"status": "ok", "inferred": len(data)}
+
+@app.get("/relations")
+def relations(q: Optional[str] = None, domain: Optional[str] = None):
+    """
+    Inspect associations in the relationship graph.
+    - /relations?q=cozy&domain=ui
+    """
+    if not q:
+        rows = list_relations()
+    else:
+        rows = related_for_item(q, src_domain_hint=domain or None, limit=20)
+    return {"count": len(rows), "rows": rows}
 
 
 @app.post("/chat")
@@ -101,9 +111,14 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
 
     add_turn("user", text, session_id=session_id)
 
+    # Heuristic: "what goes with X?"
+    if re.search(r"(?i)\b(what\s+goes\s+with|what\s+pairs\s+with|what\s+works\s+with)\b", text):
+        result = reason_about_context(text, session_id=session_id)
+        if isinstance(result, dict) and "reply" in result:
+            return {"reply": result["reply"]}
+
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # Detect topic switches
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -115,7 +130,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     for p in parsed_intents:
         intent = reason_about_context(p, text, session_id=session_id)
 
-        # --- Guard: reasoner direct replies without 'intent' key ---
+        # Guard: direct reply from reasoner
         if not isinstance(intent, dict) or "intent" not in intent:
             if isinstance(intent, dict) and "reply" in intent:
                 replies.append(intent["reply"])
@@ -129,7 +144,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
 
-        # Temporal recall (reasoner may pre-fill reply)
+        # Temporal recall (pre-filled)
         if intent.get("intent") == "temporal.recall" and intent.get("reply"):
             replies.append(intent["reply"])
             continue
@@ -159,7 +174,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         if intent.get("intent") == "preference.query":
             qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
             if qdom == "food":
-                likes = [p["item"] for p in get_preferences("food", min_strength=0.0) if p["polarity"] > 0]
+                likes = [p["item"] for p in get_preferences("food", min_strength=0.0) if p["polarity"] > 0]  # type: ignore
                 dislikes = [p["item"] for p in get_dislikes("food")]
                 parts = []
                 if likes:
@@ -168,7 +183,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                     parts.append(f"you don't like {', '.join(sorted(set(dislikes)))}")
                 replies.append("Based on what you've shared, " + " and ".join(parts) + ".")
             elif qdom == "ui":
-                likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]
+                likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]  # type: ignore
                 if likes:
                     replies.append(f"You like these layout styles: {', '.join(sorted(set(likes)))}.")
                 else:
@@ -240,7 +255,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         q = clarifying_line(frame["next_question"])
         replies.append(f"{hint}{q}")
 
-    # Router / brain fallback (unchanged)
+    # Router / brain fallback
     if not replies:
         try:
             router_output = route(text)
@@ -266,7 +281,6 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # Plugin dispatch...
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:
