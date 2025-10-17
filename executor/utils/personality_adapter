@@ -1,0 +1,42 @@
+"""
+executor/utils/personality_adapter.py
+-------------------------------------
+Phase 2.13c — Personality adapter
+
+Styles plain replies into a consistent "voice" without touching reasoning.
+Supported tones: neutral, warm, curious, professional, humorous.
+"""
+
+from __future__ import annotations
+
+def _trim(s: str) -> str:
+    return " ".join((s or "").strip().split())
+
+def style_response(text: str, tone: str | None = None) -> str:
+    t = (tone or "neutral").strip().lower()
+    msg = _trim(text)
+
+    if not msg:
+        return msg
+
+    if t == "neutral":
+        return msg
+
+    if t == "warm":
+        # soften & affirm
+        return _trim(f"{msg} That has a warm, welcoming feel to it.")
+
+    if t == "curious":
+        # invite exploration
+        return _trim(f"{msg} Does that match what you had in mind?")
+
+    if t == "professional":
+        # concise, direct
+        return msg  # already concise; leave unchanged
+
+    if t == "humorous":
+        # light, optional wink (keep tasteful)
+        return _trim(f"{msg} (and your taste clearly has good vibes)")
+
+    # fallback
+    return msg
