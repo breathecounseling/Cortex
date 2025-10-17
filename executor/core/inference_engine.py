@@ -1,56 +1,74 @@
 """
 executor/core/inference_engine.py
 ---------------------------------
-Phase 2.12 — Contextual inference engine
+Phase 2.12b — Contextual inference engine (robust JSON parsing)
 
-Uses the model to infer implicit preferences and tendencies from
-explicit, stored preferences. Results are persisted so reasoning and
-orchestration can use them in future turns.
+- Ensures LLM responses are parsed even if wrapped in text.
+- Prints [Inference] Input summary for Fly log visibility.
+- Stores inferred preferences in /data/memory.db.
 """
 
 from __future__ import annotations
-import json
+import json, re
 from typing import Any, Dict, List
 
 from executor.utils.preference_graph import get_preferences
 from executor.utils.inference_graph import upsert_inferred_preference
 from executor.ai.router import chat as brain_chat
 
+# ---------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------
 SYSTEM_PROMPT = (
-    "You are Echo's reasoning engine.\n"
-    "Given the user's explicit preferences (likes/dislikes) below, infer implicit traits,\n"
-    "aesthetic tendencies, and related cross-domain preferences. Keep the output factual and conservative.\n"
-    "Only return a JSON array with objects of the form:\n"
-    "[{\"domain\":\"ui\",\"item\":\"soft palette\",\"polarity\":1,\"confidence\":0.85}, ...]\n"
-    "Valid domains include (but are not limited to): ui, color, food, music, decor, style.\n"
-    "polarity: +1 for positive affinity, -1 for negative. confidence: 0..1.\n"
+    "You are Echo's reasoning engine. "
+    "Given the user's explicit preferences below, infer implicit traits, "
+    "aesthetic tendencies, and related cross-domain preferences. "
+    "Respond ONLY with a valid JSON array — no extra text, no commentary. "
+    "If nothing can be inferred, return []. "
+    "Each object must have keys: domain, item, polarity (+1 or -1), confidence (0–1)."
 )
 
+# ---------------------------------------------------------------------
+# Inference
+# ---------------------------------------------------------------------
 def infer_contextual_preferences(session_id: str = "default") -> List[Dict[str, Any]]:
     """
-    Pull explicit preferences, ask the model for implicit inferences,
+    Pull explicit preferences, query the model for implicit inferences,
     and persist them in inferred_preferences.
     """
-    # 1) Gather all explicit preferences (any domain, any strength)
-    prefs = get_preferences(domain=None, min_strength=0.0)  # type: ignore
+    # 1️⃣ Gather all explicit preferences (any domain)
+    prefs = get_preferences(domain=None, min_strength=0.0)
     if not prefs:
-        print("[Inference] No explicit preferences; skipping inference.")
+        print("[Inference] No explicit preferences found; skipping inference.")
         return []
 
-    # 2) Prepare LLM input
+    # 2️⃣ Prepare model input
     facts_str = json.dumps(prefs, indent=2)
-    prompt = f"{SYSTEM_PROMPT}\n\nExplicit preferences:\n{facts_str}\n\nInferred JSON:"
+    prompt = f"{SYSTEM_PROMPT}\n\nExplicit user preferences:\n{facts_str}\n\nJSON:"
 
-    # 3) Query model
+    print(f"[Inference] Input summary: {len(prefs)} preferences → domains:",
+          sorted({p['domain'] for p in prefs}))
+
+    # 3️⃣ Query the LLM
     try:
-        response = brain_chat(prompt)
-        response = response.strip()
-        data = json.loads(response) if response.startswith("[") else []
+        response = brain_chat(prompt).strip()
     except Exception as e:
-        print("[InferenceEngineError]", e)
+        print("[InferenceEngineError] Model call failed:", e)
+        return []
+
+    # 4️⃣ Extract JSON list safely
+    json_match = re.search(r"\[[\s\S]*\]", response)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(0))
+        except Exception as e:
+            print("[InferenceParseError]", e)
+            data = []
+    else:
+        print("[InferenceWarning] No JSON array detected in model response.")
         data = []
 
-    # 4) Persist
+    # 5️⃣ Persist in DB
     stored = 0
     for item in data:
         domain = (item.get("domain") or "misc").strip().lower()
