@@ -1,7 +1,7 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.13 — Goal tracking & drift awareness (with tone persistence)
+Phase 2.13c — Adds Resume Logic + Goal Nudging
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from executor.utils.personality_adapter import style_response
 from executor.utils.goals import (
     create_goal, close_goal, get_most_recent_open, mark_topic_active
 )
+from executor.utils.goal_resume import build_resume_prompt
 
 NUDGE_SILENCE_S = 15 * 60
 def _now() -> int: return int(time.time())
@@ -28,7 +29,7 @@ def reason_about_context(intent: Dict[str,Any], query: str,
     tone = get_tone(session_id) if session_id else "neutral"
     q = (query or "").strip()
 
-    # --- Goal create ---
+    # --- Goal creation ---
     if intent.get("intent") == "goal.create" and intent.get("value"):
         title = intent["value"]
         topic = " ".join([w for w in re.sub(r"[^a-z0-9\s]","",title.lower()).split()[:3]])
@@ -49,7 +50,13 @@ def reason_about_context(intent: Dict[str,Any], query: str,
             reply = style_response("I don’t see any open goal to close.", tone)
         return {"intent":"goal.close","reply":reply}
 
-    # --- Drift nudge ---
+    # --- Resume detection ---
+    if re.search(r"(?i)\b(resume|continue|pick\s+up|back\s+to)\b", q):
+        resume = build_resume_prompt(session_id or "default")
+        if resume:
+            return {"intent":"goal.resume","reply":resume}
+
+    # --- Drift awareness ---
     recent = get_most_recent_open(session_id or "default")
     if recent:
         current_topic = get_topic(session_id)
