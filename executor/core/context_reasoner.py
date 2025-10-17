@@ -1,74 +1,115 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.13d — Natural-language tone/personality assignment.
-Echo now interprets sentences such as:
-  "Be creative and imaginative."
-  "Act like a business consultant."
-  "Sound calm and thoughtful."
-and updates session tone automatically.
+Phase 2.12b — Tone inheritance & contextual reasoning
+
+Adds:
+- Domain-based tone adaptation via domain_traits registry
+- Maintains reasoning, temporal recall, consent, and personality persistence
 """
 
 from __future__ import annotations
 import re
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
+
 from executor.utils import memory_graph as gmem
-from executor.utils.session_context import get_tone, set_tone
+from executor.utils.session_context import (
+    get_last_fact, set_last_fact,
+    get_topic, set_topic,
+    get_tone, set_tone,
+)
+from executor.utils.turn_memory import get_recent_turns
 from executor.utils.personality_adapter import style_response
+from executor.utils.domain_traits import get_domain_tone
 
 
-# --- Tone detection patterns ---
-RX_TONE_DIRECT = re.compile(
-    r"(?i)\b(?:be|act|sound|respond|talk)\s+(?:like|as|in\s+a)?\s*(?P<style>[a-z\s,]+)[.!]?$"
-)
-RX_TONE_TRAIT = re.compile(
-    r"(?i)\b(?:be|act|sound|respond|talk)\s+(?P<traits>(?:\w+\s*,?\s*){1,5})"
-)
-
-
-def reason_about_context(intent: Dict[str, Any], query: str, session_id: str | None = None) -> Dict[str, Any]:
-    """Performs contextual reasoning, now including tone/personality interpretation."""
+# ---------- Core Reasoning ----------
+def reason_about_context(intent: Dict[str, Any], query: str,
+                         session_id: Optional[str] = None) -> Dict[str, Any]:
+    """Interpret parsed intent with awareness of session, tone, and topic."""
     try:
-        if not intent or not isinstance(intent, dict):
-            return {"intent": "smalltalk", "reply": None}
-
-        q = (query or "").strip()
-        lower_q = q.lower()
+        q = (query or "").strip().lower()
+        topic = get_topic(session_id)
         tone = get_tone(session_id) if session_id else "neutral"
+        last_dom, last_key = get_last_fact(session_id)
 
-        # --- Personality / tone assignment ---
-        m = RX_TONE_DIRECT.search(lower_q) or RX_TONE_TRAIT.search(lower_q)
-        if m:
-            style = m.group("style") if "style" in m.groupdict() and m.group("style") else m.group("traits")
-            style = style.strip().replace(",", " ").replace("  ", " ")
-            if style:
-                set_tone(session_id, style)
-                msg = f"Got it — I'll respond in a {style} tone from now on."
-                return {"intent": "tone.update", "reply": style_response(msg, style)}
+        # --- Domain tone adaptation ---
+        domain = intent.get("domain")
+        if domain:
+            tone_pref = get_domain_tone(domain)
+            if tone_pref and tone_pref != "neutral":
+                print(f"[ToneAdapt] Switching to domain tone: {tone_pref} ({domain})")
+                set_tone(session_id, tone_pref)
+                tone = tone_pref
 
-        # --- Relational reasoning ---
-        if re.search(r"\b(what\s+goes\s+with|pairs\s+with|complements)\b", lower_q):
-            related = gmem.find_related_nodes(q)
-            if not related:
-                return {"intent": "relation.query",
-                        "reply": style_response("I don't yet have associations for that.", tone)}
-            unique = []
-            for n in related:
-                if n not in unique:
-                    unique.append(n)
-            joined = ", ".join(unique)
-            base = f"{unique[0].capitalize()} goes well with {joined} because they complement each other in feel and purpose."
-            return {"intent": "relation.query", "reply": style_response(base, tone)}
+        # --- Negation inference ---
+        if re.match(r"(?i)\bno\b|not\b|none\b|never\b", q):
+            intent["intent"] = "fact.delete"
+            intent["reply"] = "Okay — I’ve cleared that for you."
+            return intent
 
-        # --- Default fallthrough ---
+        # --- Temporal recall intent ---
+        if re.search(r"\b(what did i say|remind me what we talked)\b", q):
+            turns = get_recent_turns(session_id=session_id, limit=8)
+            summary = "; ".join(
+                [t["content"] for t in turns if t["role"] == "user"]
+            )
+            intent["intent"] = "temporal.recall"
+            intent["reply"] = f"Here’s what we discussed recently: {summary}" if summary else \
+                "I don’t have any recent conversation to recall."
+            return intent
+
+        # --- Context reflection ---
+        if re.search(r"\bhow would you describe your tone\b", q):
+            tone_now = get_tone(session_id) or "neutral"
+            intent["intent"] = "meta.query"
+            intent["reply"] = style_response(
+                f"I would describe my tone as {tone_now}.",
+                tone=tone_now
+            )
+            return intent
+
+        # --- Contextual smalltalk fallback ---
+        if intent.get("intent") == "smalltalk":
+            reply = style_response("I'm here with you.", tone=tone)
+            intent["reply"] = reply
+            return intent
+
+        # --- Fact correction & follow-through ---
+        if intent.get("intent") == "fact.update" and not intent.get("domain"):
+            if last_dom:
+                intent["domain"] = last_dom
+            if last_key and not intent.get("key"):
+                intent["key"] = last_key
+
+        # --- Topic memory integration ---
+        if "topic" in q and not topic and last_dom:
+            set_topic(session_id, last_dom)
+
+        intent["tone"] = tone
         return intent
 
     except Exception as e:
         print("[ContextReasonerError]", e)
-        return {"intent": "error", "reply": f"(context failure) {e}"}
+        intent["intent"] = "error"
+        intent["reply"] = f"(internal reasoning error: {e})"
+        return intent
 
 
-def build_context_block(query: str, session_id: str | None = None) -> str:
-    """Builds a contextual system prompt for LLM fallback, preserving tone."""
+# ---------- Context Builder ----------
+def build_context_block(query: str, session_id: Optional[str] = None) -> str:
+    """Construct a synthetic prompt for the reasoning model."""
+    topic = get_topic(session_id)
     tone = get_tone(session_id) if session_id else "neutral"
-    return f"Current query: {query.strip()}\nThe assistant speaks in a {tone} tone."
+    turns = get_recent_turns(session_id=session_id, limit=6)
+    recent_dialogue = "\n".join(
+        [f"{t['role']}: {t['content']}" for t in turns]
+    )
+
+    context_parts = [
+        f"Active tone: {tone}.",
+        f"Current topic: {topic or 'general conversation'}.",
+        f"Recent dialogue:\n{recent_dialogue}",
+        f"Current query: {query.strip()}",
+    ]
+    return "\n".join(context_parts)
