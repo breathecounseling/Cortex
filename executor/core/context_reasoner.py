@@ -81,3 +81,13 @@ def reason_about_context(query: str) -> Dict[str, Any]:
 
     print(f"[ContextReasoner] Generated reply → {reply}")
     return {"reply": reply}
+
+# ---------------------------------------------------------------------
+# Legacy stub for backward compatibility
+# ---------------------------------------------------------------------
+def build_context_block(*args, **kwargs):
+    """
+    Legacy placeholder for backward compatibility.
+    No longer used in Phase 2.12c+ — kept to satisfy old imports.
+    """
+    return {"context": "deprecated"}
