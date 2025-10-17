@@ -5,6 +5,7 @@ Phase 2.12 — preference persistence and recall
 
 Handles user likes/dislikes across domains (food, ui, color, etc.)
 Now supports all-domain retrieval for inference engine.
+Restores infer_palette_from_prefs() for ui_profile compatibility.
 """
 
 from __future__ import annotations
@@ -113,3 +114,27 @@ def record_preference(domain: str, item: str, polarity: int = 1,
                       strength: float = 0.8, source: str = "parser") -> None:
     """Public entrypoint used by main/chat to record a preference."""
     upsert_preference(domain, item, polarity, strength, source)
+
+# ---------------------------------------------------------------------
+# Legacy helper (for ui_profile)
+# ---------------------------------------------------------------------
+def infer_palette_from_prefs() -> str:
+    """
+    Deduce a palette label ('dark', 'light', 'earth tones', etc.)
+    from current color/ui preferences.
+
+    ui_profile.py imports this to set a default palette.
+    """
+    prefs = get_preferences("ui")
+    items = " ".join(p["item"].lower() for p in prefs)
+    if any(k in items for k in ["dark", "black", "charcoal"]):
+        return "dark"
+    if any(k in items for k in ["light", "white", "ivory"]):
+        return "light"
+    if any(k in items for k in ["earth", "brown", "terracotta", "olive", "beige"]):
+        return "earth tones"
+    if any(k in items for k in ["blue", "cool", "aqua"]):
+        return "cool"
+    if any(k in items for k in ["warm", "red", "orange", "gold"]):
+        return "warm"
+    return "neutral"
