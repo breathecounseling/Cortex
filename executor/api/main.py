@@ -1,11 +1,8 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.13c — Personality adapter + relational reasoning integration
-
-- Adds optional `tone` to ChatBody
-- Passes tone through reasoner
-- Styles goal/plan replies via personality adapter
+Phase 2.13d — Natural-Language Tone/Personality Integration
++ Fix for reason_about_context() call (removed unsupported tone argument)
 """
 
 from __future__ import annotations
@@ -17,6 +14,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# --- Core imports ---
 from executor.utils.sanitizer import sanitize_value
 from executor.utils import memory_graph as gmem
 from executor.core.semantic_parser import parse_message
@@ -32,14 +30,16 @@ from executor.utils.dialogue_templates import clarifying_line
 from executor.core.context_orchestrator import gather_design_context
 from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
 from executor.core.inference_engine import infer_contextual_preferences
-from executor.utils.personality_adapter import style_response
 
+# --- Plugins and brain ---
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 from executor.ai.router import chat as brain_chat
+
+# --- Memory systems ---
 from executor.utils.memory import (
     init_db_if_needed, recall_context, remember_exchange,
     save_fact, list_facts, update_or_delete_from_text
@@ -49,6 +49,10 @@ from executor.utils.vector_memory import (
     retrieve_topic_summaries, hierarchical_recall
 )
 
+
+# ------------------------------------------------------------
+# FastAPI setup
+# ------------------------------------------------------------
 app = FastAPI()
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
@@ -61,7 +65,6 @@ class ChatBody(BaseModel):
     system: str | None = None
     session_id: str | None = None
     set_intimacy: int | None = None
-    tone: str | None = None     # <-- NEW
 
 
 def _session_id(request: Request, body: ChatBody) -> str:
@@ -80,6 +83,7 @@ def health():
 
 @app.get("/refresh_inference")
 def refresh_inference():
+    """Triggers the inference engine to compute implicit preferences."""
     data = infer_contextual_preferences()
     return {"status": "ok", "inferred": len(data)}
 
@@ -95,22 +99,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         return {"reply": "How can I help?"}
 
     session_id = _session_id(request, body)
-    tone = (body.tone or "neutral").strip().lower()
     if body.set_intimacy is not None:
         set_intimacy(session_id, body.set_intimacy)
     intimacy_level = get_intimacy(session_id)
 
     add_turn("user", text, session_id=session_id)
 
-    # Heuristic: "what goes with X?"
-    if re.search(r"(?i)\bwhat\s+go(?:es)?\s+with\b", text):
-        out = reason_about_context(text, session_id=session_id, tone=tone)
-        if isinstance(out, dict) and "reply" in out:
-            return {"reply": out["reply"]}
-
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # Topic setter
+    # --- Topic detection ---
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
@@ -120,55 +117,40 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     replies: list[str] = []
 
     for p in parsed_intents:
-        intent = reason_about_context(p, text, session_id=session_id, tone=tone)
+        intent = reason_about_context(p, text, session_id=session_id)  # fixed call
 
-        # Guard: reasoner direct reply
-        if not isinstance(intent, dict) or "intent" not in intent:
-            if isinstance(intent, dict) and "reply" in intent:
-                replies.append(intent["reply"])
-                continue
-            else:
-                replies.append(style_response("I’m not sure how to handle that request right now.", tone))
-                continue
-
-        # Consent gate / reflective
+        # --- Consent gate / reflective ---
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
-            replies.append(style_response(
-                "If you want me to go deeper here, I can ask a more personal question. Would you like that?",
-                tone
-            ))
+            replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
 
-        # Temporal recall (reasoner may pre-fill reply)
+        # --- Temporal recall ---
         if intent.get("intent") == "temporal.recall" and intent.get("reply"):
-            replies.append(intent["reply"])  # already styled in reasoner
+            replies.append(intent["reply"])
             continue
 
-        # Location queries
+        # --- Location queries ---
         if intent["intent"] == "location.query" and intent.get("scope") and intent.get("key"):
             node = gmem.get_node("location", intent["key"], scope=intent["scope"])
             if intent["key"] == "home":
-                rep = f"You live in {node['value']}." if node else "I'm not sure where you live."
+                replies.append(f"You live in {node['value']}." if node else "I'm not sure where you live.")
             elif intent["key"] == "current":
-                rep = f"You're currently in {node['value']}." if node else "I'm not sure where you are right now."
+                replies.append(f"You're currently in {node['value']}." if node else "I'm not sure where you are right now.")
             else:
-                rep = f"Your trip destination is {node['value']}." if node else "I don't have a trip destination yet."
-            replies.append(style_response(rep, tone))
+                replies.append(f"Your trip destination is {node['value']}." if node else "I don't have a trip destination yet.")
             set_last_fact(session_id, "location", intent["key"])
             continue
 
-        # Fact queries (graph)
+        # --- Fact queries ---
         if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
-            rep = (f"Your {intent['key']} is {node['value']}."
-                   if node and node.get("value")
-                   else f"I’m not sure about your {intent['key']}. Tell me and I’ll remember it.")
-            replies.append(style_response(rep, tone))
+            replies.append(f"Your {intent['key']} is {node['value']}." if node and node.get("value")
+                           else f"I’m not sure about your {intent['key']}. Tell me and I’ll remember it.")
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # Preference queries
+        # --- Preference queries ---
         if intent.get("intent") == "preference.query":
             qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
             if qdom == "food":
@@ -179,18 +161,18 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                     parts.append(f"you love {', '.join(sorted(set(likes)))}")
                 if dislikes:
                     parts.append(f"you don't like {', '.join(sorted(set(dislikes)))}")
-                replies.append(style_response("Based on what you've shared, " + " and ".join(parts) + ".", tone))
+                replies.append("Based on what you've shared, " + " and ".join(parts) + ".")
             elif qdom == "ui":
                 likes = [p["item"] for p in get_preferences("ui", min_strength=0.0) if p["polarity"] > 0]
                 if likes:
-                    replies.append(style_response(f"You like these layout styles: {', '.join(sorted(set(likes)))}.", tone))
+                    replies.append(f"You like these layout styles: {', '.join(sorted(set(likes)))}.")
                 else:
-                    replies.append(style_response("I don't have any saved layout preferences yet.", tone))
+                    replies.append("I don't have any saved layout preferences yet.")
             else:
-                replies.append(style_response("Tell me the category (e.g., foods, layouts) and I’ll check.", tone))
+                replies.append("I can check what you like if you tell me the category (e.g., foods, layouts).")
             continue
 
-        # Preferences (persist)
+        # --- Preferences (persist) ---
         if intent["intent"] == "preference.statement" and intent.get("key"):
             item = intent["key"]
             polarity = +1 if intent.get("polarity") == 1 else -1
@@ -199,27 +181,27 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 record_preference(domain, item, polarity=polarity, strength=0.8, source="parser")
             except Exception as e:
                 print("[PreferenceWriteError]", e)
-            replies.append(style_response(f"Noted — you {('like' if polarity>0 else 'don’t like')} {item}.", tone))
+            replies.append(f"Noted — you {('like' if polarity > 0 else 'don’t like')} {item}.")
             continue
 
-        # Negation deletes
+        # --- Negation deletes ---
         if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
             for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
                 gmem.delete_node(intent["domain"], intent["key"], sc)
             set_last_fact(session_id, intent["domain"], intent["key"])
-            replies.append(style_response(f"Okay — I’ve cleared your {intent['key']}. What should it be now?", tone))
+            replies.append(f"Okay — I’ve cleared your {intent['key']}. What should it be now?")
             continue
 
-        # Updates
+        # --- Fact updates ---
         if intent.get("intent") == "fact.update" and intent.get("key") and intent.get("value"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             val = sanitize_value(intent["value"])
             gmem.upsert_node(domain, intent["key"], val, scope="global")
             set_last_fact(session_id, domain, intent["key"])
-            replies.append(style_response(f"Got it — your {intent['key']} is {val}.", tone))
+            replies.append(f"Got it — your {intent['key']} is {val}.")
             continue
 
-        # Goal or project request → reasoning + design context
+        # --- Goal or project request ---
         if intent.get("intent") in ("goal.statement", "project.request"):
             frame = reason_about_goal(text, session_id=session_id)
             context = gather_design_context(frame.get("goal"), session_id=session_id)
@@ -237,11 +219,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 hint_parts.append(f"and remember you like {', '.join(food_likes[:2])}")
             hint = " ".join(hint_parts).strip()
             q = clarifying_line(frame["next_question"])
-            composed = (f"{hint}. {q}" if hint else q)
-            replies.append(style_response(composed, tone))
+            replies.append(f"{hint}. {q}" if hint else q)
             continue
 
-    # Heuristic goal detection if nothing routed
+    # --- Goal detection fallback ---
     GOAL_RX = re.compile(
         r"(?i)\b(i\s*(?:want|need|plan|would\s+like)\s+to\s+(?:build|create|make|develop)|"
         r"let'?s\s+build|can\s+you\s+build|help\s+me\s+build)\b"
@@ -252,15 +233,15 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         ui_palette = context["ui_prefs"].get("palette")
         hint = f"I’ll use your {ui_palette} palette. " if ui_palette else ""
         q = clarifying_line(frame["next_question"])
-        replies.append(style_response(f"{hint}{q}", tone))
+        replies.append(f"{hint}{q}")
 
-    # Router / brain fallback
+    # --- Router / LLM fallback ---
     if not replies:
         try:
             router_output = route(text)
         except Exception as e:
             print("[RouterError]", e)
-            return {"reply": style_response(f"Router error: {e}", tone)}
+            return {"reply": f"Router error: {e}"}
 
         actions = router_output.get("actions", [])
         if not actions:
@@ -278,8 +259,9 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 summarize_if_needed()
             except Exception as e:
                 print("[VectorStoreError]", e)
-            return {"reply": style_response(reply, tone)}
+            return {"reply": reply}
 
+        # --- Plugin dispatch ---
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:
@@ -302,14 +284,14 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                         context=[{"role": "system", "content": context_block}],
                     )
                     add_turn("assistant", reply, session_id)
-                    return {"reply": style_response(reply, tone)}
+                    return {"reply": reply}
                 except Exception as e:
                     print("[ReflectionError]", e)
             add_turn("assistant", summary, session_id)
-            return {"reply": style_response(summary, tone)}
+            return {"reply": summary}
         except Exception as e:
             print("[PluginError]", e)
-            return {"reply": style_response(f"Plugin error ({plugin}): {e}", tone)}
+            return {"reply": f"Plugin error ({plugin}): {e}"}
 
     final_reply = " ".join(r for r in replies if r).strip()
     add_turn("assistant", final_reply, session_id)
