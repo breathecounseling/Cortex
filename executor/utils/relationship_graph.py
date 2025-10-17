@@ -3,10 +3,10 @@ executor/utils/relationship_graph.py
 ------------------------------------
 Handles associative relationships between preferences and domains.
 
-2.13 patch:
-- Adds fuzzy lookups for related_for_item() so queries like
-  “cozy layouts” match “ui.cozy”.
-- Normalizes whitespace and punctuation.
+2.13b patch:
+- Fuzzy lookup for related_for_item()
+- Normalization helper
+- Adds relation explanation synthesis using shared tags/polarity
 """
 
 from __future__ import annotations
@@ -83,3 +83,24 @@ def related_for_item(item: str, limit: int = 5) -> List[Dict[str, Any]]:
          "tgt_item": r[4], "weight": r[5], "confidence": r[6]}
         for r in rows
     ]
+
+# --- Explanations ------------------------------------------------------
+
+_DOMAIN_TRAITS = {
+    "ui": {"tags": {"warm", "soft", "rounded", "minimal"}},
+    "color": {"tags": {"warm", "natural", "earthy", "vibrant"}},
+    "food": {"tags": {"rich", "comforting", "savory", "fresh"}},
+}
+
+def explain_relationship(src_domain: str, tgt_domain: str) -> str:
+    """Provide a simple natural explanation based on domain overlaps."""
+    src_tags = _DOMAIN_TRAITS.get(src_domain, {}).get("tags", set())
+    tgt_tags = _DOMAIN_TRAITS.get(tgt_domain, {}).get("tags", set())
+    common = src_tags.intersection(tgt_tags)
+    if common:
+        joined = ", ".join(sorted(common))
+        return f"because both evoke {joined} qualities"
+    # Fallback generic tone
+    if src_domain == tgt_domain:
+        return "because they share similar style and tone"
+    return "because they complement each other in feel and purpose"
