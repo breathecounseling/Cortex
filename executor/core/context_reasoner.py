@@ -1,8 +1,12 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.12c — Context Reasoner with cosmetic deduplication, grammar fixes,
-and backward-compatible signature for session_id.
+Phase 2.12d — Context Reasoner (cosmetic deduplication, grammar fixes, and
+robust input normalization for main.py integration).
+
+- Handles dict or string input for backward compatibility.
+- Deduplicates similar entries and formats natural lists.
+- Merges explicit + inferred preferences.
 """
 
 from __future__ import annotations
@@ -37,17 +41,22 @@ def _deduplicate_and_pretty(items: List[str]) -> str:
 # Core reasoning
 # ---------------------------------------------------------------------
 def reason_about_context(
-    query: str,
+    query: str | dict,
     *_args,
     session_id: Optional[str] = None,
-    **_kwargs
+    **_kwargs,
 ) -> Dict[str, Any]:
     """
     Simplified context reasoner:
     merges explicit + inferred preferences and returns human-readable text.
-    Accepts extra args for backward compatibility.
+    Accepts dict or string input for backward compatibility.
     """
+
+    # --- Normalize query safely ---
+    if isinstance(query, dict):
+        query = query.get("text") or query.get("query") or str(query)
     q = (query or "").lower().strip()
+
     prefs = get_preferences()
     inferred = list_inferred_preferences()
 
@@ -116,6 +125,6 @@ def reason_about_context(
 def build_context_block(*args, **kwargs):
     """
     Legacy placeholder for backward compatibility.
-    No longer used in Phase 2.12c+ — kept to satisfy old imports.
+    No longer used in Phase 2.12+, kept to satisfy old imports.
     """
     return {"context": "deprecated"}
