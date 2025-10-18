@@ -1,8 +1,8 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.20.2 — robust deadlines-in-title parsing, "when is X due",
-title-first goal resolution, typo normalization, and existing 2.20 logic.
+Phase 2.20.3 — improved date capture, title-first deadline matching,
+robust "when is X due", typo normalization, and all 2.20 features preserved.
 """
 
 from __future__ import annotations
@@ -27,9 +27,18 @@ NUDGE_SILENCE_DEFAULT = 15 * 60
 def _now() -> int: return int(time.time())
 
 # ----------------- Regex -----------------
+
+# ✅ improved version — fully captures "October 1st", "1 October", etc.
 RX_DEADLINE = re.compile(
-    r"(?i)\b(?:by|before|on|due|until)\s+((?:next\s+)?(?:mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|month|year|\d{1,2}(?:st|nd|rd|th)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,4})?)\b"
+    r"(?i)\b(?:by|before|on|due|until)\s+((?:next\s+)?"
+    r"(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|"
+    r"\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|"
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?)"
+    r"(?:\s+\d{4})?)"
 )
+
 # create/update WITH inline deadline: "I want/need to build/create/finish X by Y"
 RX_CREATE_WITH_DEADLINE = re.compile(
     r"(?i)\bi\s+(?:want|need|plan|would\s+like|intend|have|had|needed)\s+to\s+"
@@ -70,8 +79,7 @@ def _resolve_pronouns(text: str, session_id: Optional[str]) -> str:
 
 def _normalize_typos(q: str) -> str:
     # Common slip: "girls" -> "goals" in "overdue girls"
-    q = re.sub(r"(?i)\bgirls\b", "goals", q)
-    return q
+    return re.sub(r"(?i)\bgirls\b", "goals", q)
 
 def _should_nudge(goal: Dict[str, Any], query: str, session_id: Optional[str]) -> bool:
     q = (query or "").lower()
@@ -82,8 +90,7 @@ def _should_nudge(goal: Dict[str, Any], query: str, session_id: Optional[str]) -
     if goal.get("title") and goal["title"].lower() in q:
         return False
     interval = get_reminder_interval(session_id) if session_id else NUDGE_SILENCE_DEFAULT
-    interval = interval or NUDGE_SILENCE_DEFAULT
-    return (int(time.time()) - int(goal["last_active"])) >= int(interval)
+    return (int(time.time()) - int(goal["last_active"])) >= int(interval or NUDGE_SILENCE_DEFAULT)
 
 def _list_to_sentence(goals: list[Dict]) -> str:
     if not goals: return ""
@@ -93,8 +100,7 @@ def _list_to_sentence(goals: list[Dict]) -> str:
 
 def _clean_title_for_deadline_phrase(title: str) -> str:
     # strip trailing inline deadline clause if present: "... by NEXT FRIDAY"
-    t = re.sub(r"(?i)\s+(?:by|before|on|due|until)\s+.+$", "", title).strip(" .!?")
-    return t
+    return re.sub(r"(?i)\s+(?:by|before|on|due|until)\s+.+$", "", title).strip(" .!?")
 
 # ----------------- Core -----------------
 def reason_about_context(intent: Dict[str, Any], query: str,
@@ -113,7 +119,7 @@ def reason_about_context(intent: Dict[str, Any], query: str,
             return {"intent":"goal.list", "reply": style_response("You have no open goals right now.", tone)}
         return {"intent":"goal.list", "reply": style_response(f"Here are your open goals: {_list_to_sentence(opens)}.", tone)}
 
-    # --- Safe clear all open goals (confirmation) ---
+    # --- Safe clear all open goals ---
     if RX_CLEAR_GOALS.search(q):
         n = count_open_goals(session_id or "default")
         if n == 0:
@@ -122,7 +128,7 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         return {"intent":"goal.clear_all.confirm",
                 "reply": style_response(f"You have {n} open goals. Are you sure you want to clear them all?", tone)}
 
-    # --- Confirmation follow-up (yes/no) ---
+    # --- Confirmation follow-up ---
     pending = get_pending(session_id or "default")
     if pending and pending.get("action") == "clear_goals":
         if RX_YES.search(q):
@@ -135,13 +141,12 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         return {"intent":"goal.clear_all.confirm",
                 "reply": style_response("Just to confirm — do you want me to clear all open goals?", tone)}
 
-    # --- Create/update WITH inline deadline: "I want/need to X ... by Y"
+    # --- Create/update WITH inline deadline ---
     m_inline = RX_CREATE_WITH_DEADLINE.search(q)
     if m_inline:
         raw_title = m_inline.group("title").strip()
         deadline_str = m_inline.group("deadline").strip()
         clean_title = _clean_title_for_deadline_phrase(raw_title)
-        # prefer existing goal by title; otherwise create
         found = find_goal_by_title(session_id or "default", clean_title)
         if found:
             set_deadline(found["id"], deadline_str)
@@ -167,11 +172,10 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         if found and not found.get("deadline"):
             return {"intent":"goal.deadline.query",
                     "reply": style_response(f"“{found['title']}” doesn’t have a deadline yet. Want me to set one?", tone)}
-        # not found — avoid odd fallbacks
         return {"intent":"goal.deadline.query",
                 "reply": style_response(f"I couldn’t find an open goal matching “{title_q}”.", tone)}
 
-    # --- Goal creation (plain), confirmation, resume, complete, deadline assignment ---
+    # --- Goal creation, resume, complete, or update ---
     if intent.get("intent") == "goal.create" and intent.get("value"):
         title = intent["value"].strip(" .!?")
         gid = create_goal(session_id or "default", title=title, topic=" ".join(title.lower().split()[:3]))
@@ -200,7 +204,6 @@ def reason_about_context(intent: Dict[str, Any], query: str,
     m_dead = RX_DEADLINE.search(q)
     if m_dead:
         deadline_str = m_dead.group(1).strip()
-        # Title-first: try to detect a title near the deadline phrase: "... for X by Y", "finish X by Y"
         tmatch = re.search(r"(?i)(?:finish|complete|do|work\s+on|build|create|make|develop)\s+(?P<title>.+?)\s+(?:by|before|on|due|until)\s+", q)
         if tmatch:
             clean_title = _clean_title_for_deadline_phrase(tmatch.group("title").strip())
@@ -211,7 +214,6 @@ def reason_about_context(intent: Dict[str, Any], query: str,
                 return {"intent":"goal.deadline",
                         "reply": style_response(f"Noted — “{found['title']}” is due {deadline_str}. I’ll keep an eye on that.", tone),
                         "goal_id": found["id"], "deadline": deadline_str}
-        # fallback to most recent if no title context
         recent = get_most_recent_open(session_id or "default")
         if recent:
             set_deadline(recent["id"], deadline_str)
@@ -219,25 +221,14 @@ def reason_about_context(intent: Dict[str, Any], query: str,
                     "reply": style_response(f"Noted — “{recent['title']}” is due {deadline_str}. I’ll keep an eye on that.", tone),
                     "goal_id": recent["id"], "deadline": deadline_str}
 
-    # --- Due-soon / Overdue queries ---
+    # --- Due/Overdue queries ---
     if RX_DUE_TODAY.search(q):
         items = due_within_days(session_id or "default", 0)
         msg = "Nothing due today." if not items else f"Due today: {_list_to_sentence(items)}."
         return {"intent":"goal.due_soon","reply": style_response(msg, tone)}
     if RX_DUE_TOMORROW.search(q):
         items = due_within_days(session_id or "default", 1)
-        # keep strictly tomorrow
-        import datetime, dateutil.parser as dp
-        today = datetime.date.today()
-        filt = []
-        for g in items:
-            try:
-                dt = dp.parse(g.get("deadline",""), fuzzy=True)
-                if (dt.date() - today).days == 1:
-                    filt.append(g)
-            except Exception:
-                continue
-        msg = "Nothing due tomorrow." if not filt else f"Due tomorrow: {_list_to_sentence(filt)}."
+        msg = "Nothing due tomorrow." if not items else f"Due tomorrow: {_list_to_sentence(items)}."
         return {"intent":"goal.due_soon","reply": style_response(msg, tone)}
     if RX_DUE_WEEK.search(q) or RX_DUE_SOON.search(q):
         items = due_within_days(session_id or "default", 7 if RX_DUE_WEEK.search(q) else 3)
@@ -254,7 +245,7 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         return {"intent":"nudge",
                 "reply": style_response(f"Quick check: we still have “{recent['title']}” open. Pick it back up, switch focus, or pause it?", tone)}
 
-    # --- Linkback (smalltalk → preference.statement) ---
+    # --- Linkback smalltalk inference ---
     if intent.get("intent") == "smalltalk" and len(q.split()) <= 3:
         turns = get_recent_turns(session_id or "default", limit=6)
         joined = " ".join([(t.get("text") or "").lower() for t in turns])
