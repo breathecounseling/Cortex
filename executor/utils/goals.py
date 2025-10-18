@@ -53,6 +53,31 @@ def ensure_goals() -> None:
 
 ensure_goals()
 
+def migrate_goals_schema() -> None:
+    """Safely adds missing columns (priority, effort_estimate, deadline, progress) if they don't exist."""
+    with _conn() as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(goals)").fetchall()]
+        add_cols = []
+        if "priority" not in cols:
+            add_cols.append(("priority", "TEXT DEFAULT 'normal'"))
+        if "effort_estimate" not in cols:
+            add_cols.append(("effort_estimate", "TEXT"))
+        if "deadline" not in cols:
+            add_cols.append(("deadline", "TEXT"))
+        if "progress" not in cols:
+            add_cols.append(("progress", "REAL DEFAULT 0.0"))
+        for col, defn in add_cols:
+            try:
+                c.execute(f"ALTER TABLE goals ADD COLUMN {col} {defn}")
+                print(f"[Goals] Added column: {col}")
+            except Exception as e:
+                print(f"[Goals] Column {col} migration failed:", e)
+        c.commit()
+
+# run automatically on import
+ensure_goals()
+migrate_goals_schema()
+
 # ---------- CRUD ----------
 def create_goal(session_id: str, title: str, topic: Optional[str]=None,
                 priority: int=2, effort_estimate: str="medium",
