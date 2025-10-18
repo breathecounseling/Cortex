@@ -1,55 +1,46 @@
 """
 executor/utils/turn_memory.py
 -----------------------------
-Short-term working memory (in-process ring buffer)
-+ compatibility shim for plugins that expect get_recent_context_text().
+Phase 2.19 — minimal turn log with get_recent_turns/add_turn helpers
 """
 
 from __future__ import annotations
+import sqlite3, time
+from pathlib import Path
 from typing import List, Dict
 
-_MAX_TURNS = 20
-_memory: List[Dict] = []
+DB_PATH = Path("/data/memory.db")
 
-def add_turn(role: str, content: str, session_id: str = "default") -> None:
-    """Append a turn to the in-memory ring buffer (most recent first)."""
-    global _memory
-    _memory.append({"role": role, "content": content, "session_id": session_id})
-    if len(_memory) > _MAX_TURNS:
-        _memory = _memory[-_MAX_TURNS:]
+def _conn():
+    c = sqlite3.connect(DB_PATH.as_posix(), check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    return c
 
-    # Persist to turn_log if available (2.11+) without hard dependency
-    try:
-        from executor.utils.turn_log import log_turn  # lazy import
-        log_turn(session_id=session_id, role=role, text=content)
-    except Exception as e:
-        # Safe to ignore in environments without turn_log
-        if str(e):
-            print("[TurnLogError]", e)
+def _ensure():
+    with _conn() as c:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS turns(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT,
+          role TEXT,                  -- 'user' | 'assistant'
+          content TEXT,
+          created_at INTEGER
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, created_at)")
+        c.commit()
 
-def get_recent_turns(session_id: str = "default", limit: int = _MAX_TURNS) -> List[Dict]:
-    """Return recent turns for this session (oldest→newest within the slice)."""
-    return [t for t in _memory if t.get("session_id") == session_id][-limit:]
+_ensure()
 
-def clear_memory(session_id: str = "default") -> None:
-    """Drop in-process turns for a session (does not affect persistent logs)."""
-    global _memory
-    _memory = [t for t in _memory if t.get("session_id") != session_id]
+def add_turn(role: str, text: str, session_id: str = "default") -> None:
+    with _conn() as c:
+        c.execute("INSERT INTO turns(session_id,role,content,created_at) VALUES(?,?,?,?)",
+                  (session_id, role, text, int(time.time())))
+        c.commit()
 
-# ------------------------------------------------------------------
-# Compatibility shim for older plugins:
-# Some plugins import get_recent_context_text() from turn_memory.
-# Provide a stable implementation that renders the recent turns.
-# ------------------------------------------------------------------
-def get_recent_context_text(limit: int = _MAX_TURNS, session_id: str = "default") -> str:
-    """
-    Render recent conversation into a single text block:
-      User: ...
-      Echo: ...
-    """
-    turns = get_recent_turns(session_id=session_id, limit=limit)
-    lines: List[str] = []
-    for t in turns:
-        who = "User" if t.get("role") == "user" else "Echo"
-        lines.append(f"{who}: {t.get('content', '')}")
-    return "\n".join(lines)
+def get_recent_turns(session_id: str = "default", limit: int = 8) -> List[Dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT role, content as text, created_at FROM turns WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+            (session_id, int(limit))
+        ).fetchall()
+    return [{"role": r["role"], "text": r["text"], "created_at": int(r["created_at"])} for r in rows][::-1]
