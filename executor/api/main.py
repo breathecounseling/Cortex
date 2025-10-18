@@ -1,8 +1,8 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.13d — Natural-Language Tone/Personality Integration
-+ Fix for reason_about_context() call (removed unsupported tone argument)
+Phase 2.20 — Focus, Feedback, and Foresight
+Complete, deploy-ready main API entrypoint for Echo.
 """
 
 from __future__ import annotations
@@ -19,27 +19,32 @@ from executor.utils.sanitizer import sanitize_value
 from executor.utils import memory_graph as gmem
 from executor.core.semantic_parser import parse_message
 from executor.utils.session_context import (
-    set_last_fact, get_last_fact,
-    set_topic, get_topic,
-    set_intimacy, get_intimacy
+    set_last_fact, get_last_fact, set_topic, get_topic,
+    set_intimacy, get_intimacy, set_tone, get_tone,
+    set_reminder_interval, get_reminder_interval
 )
 from executor.utils.turn_memory import add_turn
 from executor.core.context_reasoner import reason_about_context, build_context_block
 from executor.core.reasoning import reason_about_goal
 from executor.utils.dialogue_templates import clarifying_line
 from executor.core.context_orchestrator import gather_design_context
-from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
+from executor.utils.preference_graph import (
+    record_preference, get_preferences, get_dislikes
+)
 from executor.core.inference_engine import infer_contextual_preferences
+from executor.utils.goals import (
+    create_goal, close_goal, list_goals, get_open_goals, get_most_recent_open,
+    count_open_goals, clear_all_goals
+)
+from executor.core.daemons import start_daemons
 
-# --- Plugins and brain ---
+# --- Plugin / AI layer ---
 from executor.core.router import route
 from executor.plugins.web_search import web_search
 from executor.plugins.weather_plugin import weather_plugin
 import executor.plugins.google_places.google_places as google_places
 from executor.plugins.feedback import feedback
 from executor.ai.router import chat as brain_chat
-
-# --- Memory systems ---
 from executor.utils.memory import (
     init_db_if_needed, recall_context, remember_exchange,
     save_fact, list_facts, update_or_delete_from_text
@@ -49,16 +54,16 @@ from executor.utils.vector_memory import (
     retrieve_topic_summaries, hierarchical_recall
 )
 
-
-# ------------------------------------------------------------
-# FastAPI setup
-# ------------------------------------------------------------
+# ---------- App Setup ----------
 app = FastAPI()
 _frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=_frontend_dir.as_posix(), html=True), name="ui")
 
+init_db_if_needed()
+start_daemons()
 
+# ---------- Data Models ----------
 class ChatBody(BaseModel):
     text: str | None = None
     boost: bool | None = False
@@ -66,34 +71,44 @@ class ChatBody(BaseModel):
     session_id: str | None = None
     set_intimacy: int | None = None
 
-
+# ---------- Helpers ----------
 def _session_id(request: Request, body: ChatBody) -> str:
     return body.session_id or request.headers.get("X-Session-ID") or "default"
 
-
+# ---------- Routes ----------
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "Echo API is running."}
-
 
 @app.get("/health", include_in_schema=False)
 def health():
     return JSONResponse({"status": "ok"})
 
-
 @app.get("/refresh_inference")
 def refresh_inference():
-    """Triggers the inference engine to compute implicit preferences."""
     data = infer_contextual_preferences()
     return {"status": "ok", "inferred": len(data)}
 
+@app.post("/set_reminder_interval")
+async def set_interval(body: Dict[str, Any], request: Request):
+    minutes = int(body.get("minutes", 15))
+    sid = body.get("session_id") or "default"
+    set_reminder_interval(sid, minutes * 60)
+    return {"status": "ok", "interval_seconds": minutes * 60}
 
+@app.get("/get_reminder_interval")
+def get_interval(session_id: Optional[str] = None):
+    sid = session_id or "default"
+    return {"status": "ok", "interval_seconds": get_reminder_interval(sid)}
+
+# ---------- Chat Endpoint ----------
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     try:
         raw = await request.json()
     except Exception:
         raw = {}
+
     text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
     if not text:
         return {"reply": "How can I help?"}
@@ -103,34 +118,54 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         set_intimacy(session_id, body.set_intimacy)
     intimacy_level = get_intimacy(session_id)
 
+    # Record the user turn
     add_turn("user", text, session_id=session_id)
+
+    # Tone / topic checks
+    if re.search(r"(?i)\b(be|act|respond)\s+(calm|friendly|motivating|tough|flirty|playful|neutral)\b", text):
+        tone_match = re.search(r"(?i)(calm|friendly|motivating|tough|flirty|playful|neutral)", text)
+        if tone_match:
+            tone = tone_match.group(1).lower()
+            set_tone(session_id, tone)
+            return {"reply": f"Got it — I’ll keep my tone {tone} from now on."}
 
     parsed_intents = parse_message(text, intimacy_level=intimacy_level)
 
-    # --- Topic detection ---
+    # Topic switch detection
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
         if topic:
             set_topic(session_id, topic)
+            set_tone(session_id, "neutral")  # reset tone when topic changes
 
     replies: list[str] = []
 
     for p in parsed_intents:
-        intent = reason_about_context(p, text, session_id=session_id)  # fixed call
+        intent = reason_about_context(p, text, session_id=session_id)
 
-        # --- Consent gate / reflective ---
+        # Reflective consent
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
             replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
             continue
 
-        # --- Temporal recall ---
+        # Temporal recall
         if intent.get("intent") == "temporal.recall" and intent.get("reply"):
             replies.append(intent["reply"])
             continue
 
-        # --- Location queries ---
-        if intent["intent"] == "location.query" and intent.get("scope") and intent.get("key"):
+        # Goal management responses (handled inside reasoner)
+        if intent.get("intent", "").startswith("goal."):
+            replies.append(intent.get("reply", ""))
+            continue
+
+        # Nudges, deadlines, reminders (already tone-styled)
+        if intent.get("intent") in ("nudge", "deadline"):
+            replies.append(intent.get("reply", ""))
+            continue
+
+        # Location queries
+        if intent.get("intent") == "location.query" and intent.get("scope") and intent.get("key"):
             node = gmem.get_node("location", intent["key"], scope=intent["scope"])
             if intent["key"] == "home":
                 replies.append(f"You live in {node['value']}." if node else "I'm not sure where you live.")
@@ -141,8 +176,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, "location", intent["key"])
             continue
 
-        # --- Fact queries ---
-        if intent["intent"].startswith("fact.query") and intent.get("key"):
+        # Fact queries
+        if intent.get("intent", "").startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
             replies.append(f"Your {intent['key']} is {node['value']}." if node and node.get("value")
@@ -150,7 +185,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             set_last_fact(session_id, domain, intent["key"])
             continue
 
-        # --- Preference queries ---
+        # Preference queries
         if intent.get("intent") == "preference.query":
             qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
             if qdom == "food":
@@ -172,8 +207,8 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 replies.append("I can check what you like if you tell me the category (e.g., foods, layouts).")
             continue
 
-        # --- Preferences (persist) ---
-        if intent["intent"] == "preference.statement" and intent.get("key"):
+        # Preferences
+        if intent.get("intent") == "preference.statement" and intent.get("key"):
             item = intent["key"]
             polarity = +1 if intent.get("polarity") == 1 else -1
             try:
@@ -181,18 +216,10 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 record_preference(domain, item, polarity=polarity, strength=0.8, source="parser")
             except Exception as e:
                 print("[PreferenceWriteError]", e)
-            replies.append(f"Noted — you {('like' if polarity > 0 else 'don’t like')} {item}.")
+            replies.append(f"Noted — you {('like' if polarity>0 else 'don’t like')} {item}.")
             continue
 
-        # --- Negation deletes ---
-        if intent.get("intent") == "fact.delete" and intent.get("domain") and intent.get("key"):
-            for sc in gmem.get_all_scopes_for_domain(intent["domain"]):
-                gmem.delete_node(intent["domain"], intent["key"], sc)
-            set_last_fact(session_id, intent["domain"], intent["key"])
-            replies.append(f"Okay — I’ve cleared your {intent['key']}. What should it be now?")
-            continue
-
-        # --- Fact updates ---
+        # Fact updates
         if intent.get("intent") == "fact.update" and intent.get("key") and intent.get("value"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             val = sanitize_value(intent["value"])
@@ -201,7 +228,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             replies.append(f"Got it — your {intent['key']} is {val}.")
             continue
 
-        # --- Goal or project request ---
+        # Goal / project creation logic
         if intent.get("intent") in ("goal.statement", "project.request"):
             frame = reason_about_goal(text, session_id=session_id)
             context = gather_design_context(frame.get("goal"), session_id=session_id)
@@ -235,7 +262,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
         q = clarifying_line(frame["next_question"])
         replies.append(f"{hint}{q}")
 
-    # --- Router / LLM fallback ---
+    # --- Fallback: Router / Brain ---
     if not replies:
         try:
             router_output = route(text)
@@ -261,7 +288,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 print("[VectorStoreError]", e)
             return {"reply": reply}
 
-        # --- Plugin dispatch ---
+        # Plugin dispatch
         action = actions[0]
         plugin = action.get("plugin"); args = action.get("args", {})
         try:
@@ -293,6 +320,7 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
             print("[PluginError]", e)
             return {"reply": f"Plugin error ({plugin}): {e}"}
 
+    # --- Final reply ---
     final_reply = " ".join(r for r in replies if r).strip()
     add_turn("assistant", final_reply, session_id)
     return {"reply": final_reply}
