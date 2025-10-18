@@ -59,8 +59,10 @@ def _should_nudge(goal: Dict[str, Any], query: str, session_id: Optional[str]) -
 
 def reason_about_context(intent: Dict[str, Any], query: str,
                          session_id: Optional[str] = None) -> Dict[str, Any]:
-    try: tone = get_tone(session_id) if session_id else "neutral"
-    except Exception: tone = "neutral"
+    try:
+        tone = get_tone(session_id) if session_id else "neutral"
+    except Exception:
+        tone = "neutral"
 
     q = _resolve_pronouns((query or "").strip(), session_id)
 
