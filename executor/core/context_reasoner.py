@@ -20,7 +20,7 @@ from executor.utils.goal_resume import build_resume_prompt
 from executor.utils.turn_memory import get_recent_turns
 
 # --- config ---
-NUDGE_SILENCE_S = 15 * 60  # set to 10 for fast testing
+NUDGE_SILENCE_S = 15  # set to 10 for fast testing
 def _now() -> int: return int(time.time())
 
 # --- simple deadline detector ---
