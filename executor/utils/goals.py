@@ -1,7 +1,7 @@
 """
 executor/utils/goals.py
 -----------------------
-Phase 2.20 — Temporal Goals + Deadlines + Priority/Effort + Safe Counts
+Phase 2.20 — Temporal Goals + Deadlines + Priority/Effort + Safe Counts + Overdue Tracking
 
 Schema:
   goals(
@@ -234,6 +234,30 @@ def due_soon_goals(session_id: str, within_days: int = 3) -> List[Dict]:
             else:
                 dt = datetime.datetime.strptime(d, "%Y-%m-%d")
             if 0 <= (dt.date() - datetime.date.today()).days <= within_days:
+                res.append(g)
+        except Exception:
+            continue
+    return res
+
+def overdue_goals(session_id: str) -> List[Dict]:
+    """Return a list of open goals whose deadlines have already passed."""
+    import datetime
+    try:
+        import dateutil.parser as dp
+    except ImportError:
+        dp = None
+
+    res = []
+    for g in get_open_goals(session_id):
+        d = (g.get("deadline") or "").strip()
+        if not d:
+            continue
+        try:
+            if dp:
+                dt = dp.parse(d, fuzzy=True)
+            else:
+                dt = datetime.datetime.strptime(d, "%Y-%m-%d")
+            if (dt.date() - datetime.date.today()).days < 0:
                 res.append(g)
         except Exception:
             continue
