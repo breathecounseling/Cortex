@@ -14,9 +14,9 @@ from executor.utils.session_context import (
 )
 from executor.utils.personality_adapter import style_response
 from executor.utils.goals import (
-    create_goal, close_goal, get_most_recent_open, mark_topic_active,
-    find_goal_by_title, set_deadline, update_goal, touch_goal, get_open_goals,
-    count_open_goals, clear_all_goals
+    create_goal, close_goal, get_most_recent_open,
+    find_goal_by_title, set_deadline, update_goal, touch_goal,
+    get_open_goals, count_open_goals, clear_all_goals
 )
 from executor.utils.goal_resume import build_resume_prompt
 from executor.utils.turn_memory import get_recent_turns
@@ -44,15 +44,6 @@ def _resolve_pronouns(text: str, session_id: Optional[str]) -> str:
         if topic:
             return RX_PRONOUN.sub(topic, text)
     return text
-
-def _recent_domain_guess(session_id: str) -> Optional[str]:
-    turns = get_recent_turns(session_id or "default", limit=6)
-    for t in reversed(turns):
-        s = (t.get("text") or "").lower()
-        if any(k in s for k in ("food","pizza","recipe","restaurant","chili","sushi")): return "food"
-        if any(k in s for k in ("color","palette","hue","shade")): return "color"
-        if any(k in s for k in ("layout","ui","interface","design")): return "ui"
-    return None
 
 def _should_nudge(goal: Dict[str, Any], query: str, session_id: Optional[str]) -> bool:
     q = (query or "").lower()
@@ -111,7 +102,6 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         topic = " ".join([w for w in re.sub(r"[^a-z0-9\s]", "", title.lower()).split()[:3]])
         gid = create_goal(session_id or "default", title=title, topic=topic)
         set_topic(session_id, topic)
-        # intelligent prompt left to 2.19's reasoner flow—reply will be formed in main if needed
         return {"intent":"goal.create","reply": style_response(f"Created goal “{title}”.", tone), "goal_id":gid,"topic":topic}
 
     # --- Confirm deliverable (module) ---
@@ -148,25 +138,25 @@ def reason_about_context(intent: Dict[str, Any], query: str,
                     "reply": style_response(f"Noted — “{recent['title']}” is due {deadline_str}. I’ll keep an eye on that.", tone),
                     "goal_id": recent["id"], "deadline": deadline_str}
 
-    # --- Linkback: one/two-word items become preferences if recent domain inferred ---
+    # --- Drift nudge (respect per-session interval) ---
+    recent = get_most_recent_open(session_id or "default")
+    if recent and _should_nudge(recent, q, session_id):
+        return {"intent":"nudge",
+                "reply": style_response(f"Quick check: we still have “{recent['title']}” open. Pick it back up, switch focus, or pause it?", tone)}
+
+    # --- Linkback (smalltalk inference) ---
     if intent.get("intent") == "smalltalk" and len(q.split()) <= 3:
         turns = get_recent_turns(session_id or "default", limit=6)
         joined = " ".join([(t.get("text") or "").lower() for t in turns])
-        inferred = "food" if any(k in joined for k in ("food","pizza","recipe","restaurant","chili","sushi")) else None
-        if inferred and q:
-            return {"intent":"preference.statement","domain":inferred,"key":q.strip(), "polarity": +1}
-
-    # --- Drift nudge (respect per-session interval) ---
-    recent = get_most_recent_open(session_id or "default")
-    if recent:
-        current_topic = get_topic(session_id)
-        if current_topic:
-            mark_topic_active(session_id or "default", current_topic)
-        if _should_nudge(recent, q, session_id):
-            return {"intent":"nudge",
-                    "reply": style_response(f"Quick check: we still have “{recent['title']}” open. Pick it back up, switch focus, or pause it?", tone)}
+        if any(k in joined for k in ("food","pizza","recipe","restaurant","chili","sushi")):
+            return {"intent":"preference.statement","domain":"food","key":q.strip(),"polarity":+1}
 
     # style passthrough
     if intent.get("reply"):
         intent["reply"] = style_response(intent["reply"], tone)
     return intent
+
+def build_context_block(query: str, session_id: Optional[str]=None) -> str:
+    topic = get_topic(session_id)
+    tone = get_tone(session_id) if session_id else "neutral"
+    return f"Active tone: {tone}\nCurrent topic: {topic or 'general'}\nCurrent query: {query.strip()}"
