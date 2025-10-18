@@ -9,8 +9,8 @@ from __future__ import annotations
 import threading, time
 from executor.utils.goals import list_sessions, stale_open_goals, due_soon_goals
 
-CHECK_INTERVAL_S = 300       # run every 5 minutes
-STALE_THRESHOLD_S = 1800     # 30 minutes inactivity
+CHECK_INTERVAL_S = 3       # run every 5 minutes
+STALE_THRESHOLD_S = 10     # 30 minutes inactivity
 DUE_SOON_DAYS = 1            # upcoming within 1 day
 
 def goal_watcher(interval_s: int = CHECK_INTERVAL_S) -> None:
