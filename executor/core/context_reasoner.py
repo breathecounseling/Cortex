@@ -1,15 +1,17 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.18c — pronoun-to-topic resolution, keep_working, confirm deliverable,
-auto-complete, resume, deadlines, drift nudges, and tone styling.
+Phase 2.19 — Linkback engine, smart smalltalk→preference inference,
+goal lifecycle, deadlines, resume, nudges (interval configurable), tone styling.
 """
 
 from __future__ import annotations
 import re, time
 from typing import Dict, Any, Optional
 
-from executor.utils.session_context import get_topic, set_topic, get_tone
+from executor.utils.session_context import (
+    get_topic, set_topic, get_tone, get_reminder_interval
+)
 from executor.utils.personality_adapter import style_response
 from executor.utils.goals import (
     create_goal, close_goal, get_most_recent_open, mark_topic_active,
@@ -18,7 +20,9 @@ from executor.utils.goals import (
 from executor.utils.goal_resume import build_resume_prompt
 from executor.utils.turn_memory import get_recent_turns
 
-NUDGE_SILENCE_S = 15 * 60
+# default for prod; can be overridden by per-session reminder interval
+NUDGE_SILENCE_DEFAULT = 15 * 60
+
 def _now() -> int: return int(time.time())
 
 RX_DEADLINE = re.compile(
@@ -28,14 +32,6 @@ RX_PRONOUN = re.compile(r"(?i)\b(it|that|this|the\s+project)\b")
 RX_RESUME  = re.compile(r"(?i)\b(keep\s+working|resume|continue|pick\s+up)\b")
 RX_COMPLETE= re.compile(r"(?i)\b(done|finished|complete|wrapped\s*up|that'?s\s*it|we'?re\s*good)\b")
 RX_CONFIRM_MODULE = re.compile(r"(?i)\b(full\s+module|as\s+a\s+module|make\s+it\s+a\s+module|build\s+a\s+module)\b")
-
-def _should_nudge(goal: Dict[str, Any], query: str) -> bool:
-    q = (query or "").lower()
-    if RX_RESUME.search(q): return False    # user is explicitly resuming
-    if "switch" in q or "pause" in q: return False
-    if goal.get("topic") and goal["topic"].lower() in q: return False
-    if goal.get("title") and goal["title"].lower() in q: return False
-    return (_now() - int(goal["last_active"])) >= NUDGE_SILENCE_S
 
 def _resolve_pronouns(text: str, session_id: Optional[str]) -> str:
     if RX_PRONOUN.search(text or ""):
@@ -65,6 +61,32 @@ def _smart_options(session_id: str, title: str, explicit: Optional[str]) -> str:
         return f"A spreadsheet via Phalanx might be best since {reason}. Or would you rather start a small app module with Prime?"
     return "Should this be an app module (Prime), a spreadsheet/report (Phalanx), or something else?"
 
+def _recent_domain_guess(session_id: str) -> Optional[str]:
+    """Heuristic: infer likely domain from recent turns."""
+    turns = get_recent_turns(session_id or "default", limit=6)
+    for t in reversed(turns):
+        s = (t.get("text") or "").lower()
+        if any(k in s for k in ("food","pizza","recipe","restaurant","chili","sushi")):
+            return "food"
+        if any(k in s for k in ("color","palette","hue","shade")):
+            return "color"
+        if any(k in s for k in ("layout","ui","interface","design")):
+            return "ui"
+    return None
+
+def _should_nudge(goal: Dict[str, Any], query: str, session_id: Optional[str]) -> bool:
+    q = (query or "").lower()
+    if RX_RESUME.search(q) or "switch" in q or "pause" in q:
+        return False
+    if goal.get("topic") and goal["topic"].lower() in q:
+        return False
+    if goal.get("title") and goal["title"].lower() in q:
+        return False
+    # session-specific interval overrides default
+    interval = get_reminder_interval(session_id) if session_id else NUDGE_SILENCE_DEFAULT
+    interval = interval or NUDGE_SILENCE_DEFAULT
+    return (_now() - int(goal["last_active"])) >= int(interval)
+
 def reason_about_context(intent: Dict[str, Any], query: str,
                          session_id: Optional[str] = None) -> Dict[str, Any]:
     try:
@@ -74,7 +96,7 @@ def reason_about_context(intent: Dict[str, Any], query: str,
 
     q = _resolve_pronouns((query or "").strip(), session_id)
 
-    # 1) Goal create
+    # --- Goal create ---
     if intent.get("intent") == "goal.create" and intent.get("value"):
         title = intent["value"].strip(" .!?")
         topic = " ".join([w for w in re.sub(r"[^a-z0-9\s]", "", title.lower()).split()[:3]])
@@ -84,7 +106,7 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         reply = style_response(f"Created goal “{title}”. {suggestion}", tone)
         return {"intent":"goal.create","reply":reply,"goal_id":gid,"topic":topic}
 
-    # 2) Goal confirm deliverable (module)
+    # --- Confirm deliverable (module) ---
     if intent.get("intent") == "goal.confirm_deliverable" or RX_CONFIRM_MODULE.search(q):
         recent = get_most_recent_open(session_id or "default")
         if recent:
@@ -96,8 +118,8 @@ def reason_about_context(intent: Dict[str, Any], query: str,
             )
             return {"intent":"goal.confirm_deliverable","reply":reply}
 
-    # 3) Keep working / Resume
-    if intent.get("intent") == "goal.keep_working" or RX_RESUME.search(q):
+    # --- Keep working / resume ---
+    if intent.get("intent") == "goal.keep_working" or re.search(r"(?i)\b(keep\s+working|resume|continue|pick\s+up)\b", q):
         recent = get_most_recent_open(session_id or "default")
         if recent:
             touch_goal(recent["id"])
@@ -105,15 +127,15 @@ def reason_about_context(intent: Dict[str, Any], query: str,
             reply = style_response(resume, tone)
             return {"intent":"goal.resume","reply":reply}
 
-    # 4) Mark complete
-    if intent.get("intent") == "goal.complete" or RX_COMPLETE.search(q):
+    # --- Auto-complete cue ---
+    if intent.get("intent") == "goal.complete" or re.search(r"(?i)\b(done|finished|complete|wrapped\s*up|that'?s\s*it|we'?re\s*good)\b", q):
         recent = get_most_recent_open(session_id or "default")
         if recent:
             close_goal(recent["id"], note="Auto-closed via completion cue")
             reply = style_response(f"Nice work — I’ve marked “{recent['title']}” as complete.", tone)
             return {"intent":"goal.close","reply":reply}
 
-    # 5) Deadline
+    # --- Deadline assignment ---
     m_dead = RX_DEADLINE.search(q)
     if m_dead:
         deadline_str = m_dead.group(1).strip()
@@ -126,22 +148,19 @@ def reason_about_context(intent: Dict[str, Any], query: str,
             )
             return {"intent":"goal.deadline","reply":reply,"goal_id":recent["id"],"deadline":deadline_str}
 
-    # 6) Resume keyword (fallback)
-    if re.search(r"(?i)\b(back\s+to)\b", q):
-        recent = get_most_recent_open(session_id or "default")
-        if recent:
-            touch_goal(recent["id"])
-            resume = build_resume_prompt(session_id or "default") or f"Let’s continue “{recent['title']}”."
-            reply = style_response(resume, tone)
-            return {"intent":"goal.resume","reply":reply}
+    # --- Linkback engine: smalltalk → preference.statement if likely ---
+    if intent.get("intent") == "smalltalk" and len(q.split()) <= 3:
+        guess = _recent_domain_guess(session_id or "default")
+        if guess and q:
+            return {"intent":"preference.statement","domain":guess,"key":q.strip(), "polarity": +1}
 
-    # 7) Drift nudge
+    # --- Drift nudge ---
     recent = get_most_recent_open(session_id or "default")
     if recent:
         current_topic = get_topic(session_id)
         if current_topic:
             mark_topic_active(session_id or "default", current_topic)
-        if _should_nudge(recent, q):
+        if _should_nudge(recent, q, session_id):
             nudge = style_response(
                 f"Quick check: we still have “{recent['title']}” open. Pick it back up, switch focus, or pause it?",
                 tone
