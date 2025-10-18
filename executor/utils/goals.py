@@ -1,11 +1,11 @@
 """
 executor/utils/goals.py
 -----------------------
-Phase 2.20 — Temporal Goals + Deadlines + Priority/Effort + Session support
+Phase 2.21 — Temporal Goals + Deadlines + Priority/Effort + Session support
 """
 
 from __future__ import annotations
-import sqlite3, time, re
+import sqlite3, time
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -105,6 +105,13 @@ def touch_goal(id_: int, note: str="") -> None:
                   (_now(), _now(), note if note else None, id_))
         c.commit()
 
+def delete_goal(id_: int) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM goals WHERE id=?", (id_,))
+        c.commit()
+    print(f"[Goals] Deleted #{id_}")
+
+# ---------- Queries ----------
 def list_goals(session_id: str, status: Optional[str]=None, limit: int=50) -> List[Dict]:
     q = ("SELECT id,title,topic,status,priority,effort_estimate,deadline,progress,progress_note,"
          "created_at,updated_at,last_active FROM goals WHERE session_id=?")
@@ -159,42 +166,53 @@ def clear_all_goals(session_id: str) -> int:
     print(f"[Goals] Cleared {count} open goals for session {session_id}")
     return count
 
-def mark_topic_active(session_id: str, topic: str) -> None:
-    with _conn() as c:
-        c.execute("""UPDATE goals SET last_active=?, updated_at=?
-                     WHERE session_id=? AND status='open'
-                     AND (topic=? OR title LIKE ?)""",
-                  (_now(), _now(), session_id, topic, f"%{topic}%"))
-        c.commit()
-
 # ---------- Sessions ----------
 def list_sessions() -> List[str]:
-    """Return all distinct session_ids that have any goals."""
     with _conn() as c:
         rows = c.execute("SELECT DISTINCT session_id FROM goals").fetchall()
     return [r[0] for r in rows]
 
-# ---------- Helpers for scheduler ----------
-def stale_open_goals(session_id: str, older_than_s: int) -> List[Dict]:
-    now = _now()
-    return [g for g in get_open_goals(session_id)
-            if now - int(g["last_active"]) >= older_than_s]
-
-def due_soon_goals(session_id: str, within_days: int=3) -> List[Dict]:
-    """Heuristic: parse a day number if present in 'deadline' string like '2025-01-10' or 'Jan 10'."""
+# ---------- Helpers for scheduler & queries ----------
+def _parse_deadline(d: str):
     import datetime
     try:
         import dateutil.parser as dp
+        return dp.parse(d, fuzzy=True)
     except Exception:
-        dp = None
+        # last-ditch ISO attempt
+        try:
+            return datetime.datetime.fromisoformat(d)
+        except Exception:
+            return None
+
+def due_within_days(session_id: str, days: int) -> List[Dict]:
+    """Goals due within N days (including today)."""
+    import datetime
+    now = datetime.date.today()
     res = []
     for g in get_open_goals(session_id):
         d = (g.get("deadline") or "").strip()
         if not d: continue
-        try:
-            dt = dp.parse(d, fuzzy=True) if dp else datetime.datetime.strptime(d, "%Y-%m-%d")
-            if 0 <= (dt.date() - datetime.date.today()).days <= within_days:
-                res.append(g)
-        except Exception:
-            continue
+        dt = _parse_deadline(d)
+        if not dt: continue
+        delta = (dt.date() - now).days
+        if 0 <= delta <= days:
+            res.append(g)
+    return res
+
+def due_soon_goals(session_id: str, within_days: int=3) -> List[Dict]:
+    return due_within_days(session_id, within_days)
+
+def overdue_goals(session_id: str) -> List[Dict]:
+    """Goals with a deadline earlier than today."""
+    import datetime
+    now = datetime.date.today()
+    res = []
+    for g in get_open_goals(session_id):
+        d = (g.get("deadline") or "").strip()
+        if not d: continue
+        dt = _parse_deadline(d)
+        if not dt: continue
+        if (dt.date() - now).days < 0:
+            res.append(g)
     return res
