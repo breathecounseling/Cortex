@@ -1,26 +1,41 @@
 """
 executor/utils/goals.py
 -----------------------
-Phase 2.20 — Temporal Goals + Deadlines + Priority/Effort
+Phase 2.20 — Temporal Goals + Deadlines + Priority/Effort + Safe Counts
+
+Schema:
+  goals(
+    id INTEGER PK,
+    session_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    topic TEXT,
+    status TEXT DEFAULT 'open',        -- open | paused | closed
+    priority INTEGER DEFAULT 2,        -- 3 high | 2 med | 1 low
+    effort_estimate TEXT DEFAULT 'medium',  -- small|medium|large
+    deadline TEXT,                     -- ISO-ish or human string
+    progress INTEGER DEFAULT 0,        -- 0..100
+    progress_note TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_active INTEGER NOT NULL
+  )
 """
 
 from __future__ import annotations
-import sqlite3, time
+import sqlite3, time, re
 from pathlib import Path
 from typing import List, Dict, Optional
 
 DB_PATH = Path("/data/memory.db")
 
-
 def _now() -> int:
     return int(time.time())
-
 
 def _conn():
     return sqlite3.connect(DB_PATH.as_posix(), check_same_thread=False)
 
+# ---------- Setup ----------
 
-# ---------- Setup & Migration ----------
 def ensure_goals() -> None:
     with _conn() as c:
         c.execute("""
@@ -29,11 +44,11 @@ def ensure_goals() -> None:
           session_id TEXT NOT NULL,
           title TEXT NOT NULL,
           topic TEXT,
-          status TEXT DEFAULT 'open',               -- open | paused | closed
-          priority INTEGER DEFAULT 2,               -- 3 high | 2 med | 1 low
-          effort_estimate TEXT DEFAULT 'medium',    -- small|medium|large
-          deadline TEXT,                            -- ISO-ish or natural string
-          progress INTEGER DEFAULT 0,               -- 0..100
+          status TEXT DEFAULT 'open',
+          priority INTEGER DEFAULT 2,
+          effort_estimate TEXT DEFAULT 'medium',
+          deadline TEXT,
+          progress INTEGER DEFAULT 0,
           progress_note TEXT,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
@@ -42,9 +57,10 @@ def ensure_goals() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_goals_session ON goals(session_id,status,last_active)")
         c.commit()
 
+ensure_goals()
 
 def migrate_goals_schema() -> None:
-    """Adds missing columns (priority, effort_estimate, deadline, progress) if they don't exist."""
+    """Safely adds missing columns (priority, effort_estimate, deadline, progress) if they don't exist."""
     with _conn() as c:
         cols = [r[1] for r in c.execute("PRAGMA table_info(goals)").fetchall()]
         add_cols = []
@@ -64,13 +80,10 @@ def migrate_goals_schema() -> None:
                 print(f"[Goals] Column {col} migration failed:", e)
         c.commit()
 
-
-# Initialize schema
-ensure_goals()
 migrate_goals_schema()
 
-
 # ---------- CRUD ----------
+
 def create_goal(session_id: str, title: str, topic: Optional[str] = None,
                 priority: int = 2, effort_estimate: str = "medium",
                 deadline: Optional[str] = None, note: str = "") -> int:
@@ -87,7 +100,6 @@ def create_goal(session_id: str, title: str, topic: Optional[str] = None,
     print(f"[Goals] Created #{gid}: {title}")
     return int(gid)
 
-
 def update_goal(id_: int, **fields) -> None:
     if not fields:
         return
@@ -101,20 +113,16 @@ def update_goal(id_: int, **fields) -> None:
         c.execute(f"UPDATE goals SET {', '.join(sets)} WHERE id=?", (*vals, id_))
         c.commit()
 
-
 def pause_goal(id_: int) -> None:
     update_goal(id_, status="paused")
-
 
 def close_goal(id_: int, note: str = "") -> None:
     update_goal(id_, status="closed", progress_note=note)
     print(f"[Goals] Closed #{id_}")
 
-
 def set_deadline(id_: int, deadline: str) -> None:
     update_goal(id_, deadline=deadline)
     print(f"[Goals] Set deadline for #{id_} → {deadline}")
-
 
 def touch_goal(id_: int, note: str = "") -> None:
     with _conn() as c:
@@ -122,6 +130,7 @@ def touch_goal(id_: int, note: str = "") -> None:
                   (_now(), _now(), note if note else None, id_))
         c.commit()
 
+# ---------- Listing & Retrieval ----------
 
 def list_goals(session_id: str, status: Optional[str] = None, limit: int = 50) -> List[Dict]:
     q = ("SELECT id,title,topic,status,priority,effort_estimate,deadline,progress,progress_note,"
@@ -140,10 +149,8 @@ def list_goals(session_id: str, status: Optional[str] = None, limit: int = 50) -
         "created_at": r[9], "updated_at": r[10], "last_active": r[11]
     } for r in rows]
 
-
 def get_open_goals(session_id: str) -> List[Dict]:
     return list_goals(session_id, status="open", limit=200)
-
 
 def get_most_recent_open(session_id: str) -> Optional[Dict]:
     with _conn() as c:
@@ -152,10 +159,11 @@ def get_most_recent_open(session_id: str) -> Optional[Dict]:
                          ORDER BY last_active DESC LIMIT 1""", (session_id,)).fetchone()
     if not r:
         return None
-    return {"id": r[0], "title": r[1], "topic": r[2], "status": r[3],
-            "priority": r[4], "effort_estimate": r[5], "deadline": r[6],
-            "progress": r[7], "last_active": r[8]}
-
+    return {
+        "id": r[0], "title": r[1], "topic": r[2], "status": r[3],
+        "priority": r[4], "effort_estimate": r[5], "deadline": r[6],
+        "progress": r[7], "last_active": r[8]
+    }
 
 def find_goal_by_title(session_id: str, partial: str) -> Optional[Dict]:
     with _conn() as c:
@@ -165,10 +173,11 @@ def find_goal_by_title(session_id: str, partial: str) -> Optional[Dict]:
                       (session_id, f"%{partial.strip()}%")).fetchone()
     if not r:
         return None
-    return {"id": r[0], "title": r[1], "topic": r[2], "status": r[3],
-            "priority": r[4], "effort_estimate": r[5], "deadline": r[6],
-            "progress": r[7], "last_active": r[8]}
-
+    return {
+        "id": r[0], "title": r[1], "topic": r[2], "status": r[3],
+        "priority": r[4], "effort_estimate": r[5], "deadline": r[6],
+        "progress": r[7], "last_active": r[8]
+    }
 
 def mark_topic_active(session_id: str, topic: str) -> None:
     with _conn() as c:
@@ -178,29 +187,34 @@ def mark_topic_active(session_id: str, topic: str) -> None:
                   (_now(), _now(), session_id, topic, f"%{topic}%"))
         c.commit()
 
+# ---------- Counts & Clear ----------
+
+def count_open_goals(session_id: str) -> int:
+    """Return number of open goals for this session."""
+    with _conn() as c:
+        r = c.execute("SELECT COUNT(*) FROM goals WHERE session_id=? AND status='open'", (session_id,)).fetchone()
+    return int(r[0] if r else 0)
+
+def clear_all_goals(session_id: str) -> int:
+    """Clear all open goals for a session."""
+    with _conn() as c:
+        r = c.execute("DELETE FROM goals WHERE session_id=? AND status='open'", (session_id,))
+        c.commit()
+    return r.rowcount
 
 # ---------- Sessions ----------
+
 def list_sessions() -> List[str]:
     with _conn() as c:
         rows = c.execute("SELECT DISTINCT session_id FROM goals").fetchall()
     return [r[0] for r in rows]
 
+# ---------- Scheduler Helpers ----------
 
-# ---------- Scheduler helpers ----------
-def stale_open_goals(session_id: str, older_than_s: int = 900) -> List[Dict]:
-    """Return open goals that haven't been active for a while."""
+def stale_open_goals(session_id: str, older_than_s: int) -> List[Dict]:
     now = _now()
-    goals = get_open_goals(session_id)
-    stale = []
-    for g in goals:
-        try:
-            last = int(g.get("last_active") or 0)
-            if now - last >= older_than_s:
-                stale.append(g)
-        except Exception:
-            continue
-    return stale
-
+    return [g for g in get_open_goals(session_id)
+            if now - int(g["last_active"]) >= older_than_s]
 
 def due_soon_goals(session_id: str, within_days: int = 3) -> List[Dict]:
     """Heuristic: parse a day number if present in 'deadline' string like '2025-01-10' or 'Jan 10'."""
@@ -209,7 +223,6 @@ def due_soon_goals(session_id: str, within_days: int = 3) -> List[Dict]:
         import dateutil.parser as dp
     except ImportError:
         dp = None
-
     res = []
     for g in get_open_goals(session_id):
         d = (g.get("deadline") or "").strip()
@@ -219,7 +232,7 @@ def due_soon_goals(session_id: str, within_days: int = 3) -> List[Dict]:
             if dp:
                 dt = dp.parse(d, fuzzy=True)
             else:
-                dt = datetime.datetime.strptime(d[:10], "%Y-%m-%d")
+                dt = datetime.datetime.strptime(d, "%Y-%m-%d")
             if 0 <= (dt.date() - datetime.date.today()).days <= within_days:
                 res.append(g)
         except Exception:
