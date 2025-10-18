@@ -1,7 +1,7 @@
 """
 executor/api/main.py
 --------------------
-Phase 2.15 — Temporal + NBA + Goal Switching + Deadlines (stable)
+Phase 2.19 — Linkback-aware chat, daemons, goals, contextualized search.
 """
 
 from __future__ import annotations
@@ -21,18 +21,21 @@ from executor.core.semantic_parser import parse_message
 from executor.utils.session_context import (
     set_last_fact, get_last_fact, set_topic, get_topic, set_intimacy, get_intimacy
 )
-from executor.utils.turn_memory import add_turn
+from executor.utils.turn_memory import add_turn, get_recent_turns
 from executor.core.context_reasoner import reason_about_context, build_context_block
 from executor.core.reasoning import reason_about_goal
 from executor.utils.dialogue_templates import clarifying_line
 from executor.core.context_orchestrator import gather_design_context
 from executor.utils.preference_graph import record_preference, get_preferences, get_dislikes
-from executor.core.inference_engine import suggest_next_goal, infer_contextual_preferences
 
-# Goals + Scheduler
-from executor.utils.goals import list_goals, close_goal, get_most_recent_open
+# NBA
+from executor.core.inference_engine import suggest_next_goal
+
+# Goals + Daemons
+from executor.utils.goals import list_goals, close_goal, get_most_recent_open, delete_goal
 from executor.utils.goal_resume import build_resume_prompt
-from executor.utils.scheduler import check_all_sessions, start_scheduler
+from executor.core.daemons import start_daemons
+from executor.utils.scheduler import check_all_sessions
 
 # Router / Plugins / Brain
 from executor.core.router import route
@@ -70,68 +73,109 @@ def _session_id(request: Request, body: ChatBody) -> str:
 @app.on_event("startup")
 def _startup():
     try:
-        start_scheduler(interval_s=600)
+        start_daemons()
+        print("[Startup] Daemons started.")
     except Exception as e:
         print("[SchedulerStartupError]", e)
 
 @app.get("/")
 def root() -> Dict[str, Any]:
-    return {"status": "ok", "message": "Echo API running."}
+    return {"status": "ok", "message": "Echo API is running."}
 
 @app.get("/health", include_in_schema=False)
 def health(): return JSONResponse({"status": "ok"})
 
+# Goals
 @app.get("/goals")
 def goals(session_id: Optional[str] = None, status: Optional[str] = None, limit: int = 20):
     sid = session_id or "default"
     return {"goals": list_goals(sid, status=status, limit=limit)}
 
+@app.get("/goals/resume")
+def goals_resume(session_id: Optional[str] = None):
+    sid = session_id or "default"
+    text = build_resume_prompt(sid)
+    return {"status": "ok", "reply": text or "No open goal to resume."}
+
+@app.post("/goals/close")
+async def goals_close(body: ChatBody, request: Request):
+    sid = _session_id(request, body)
+    recent = get_most_recent_open(sid)
+    if not recent:
+        return {"status": "ok", "message": "No open goal."}
+    close_goal(recent["id"], note="Closed via API")
+    return {"status": "ok", "message": f"Closed “{recent['title']}”"}
+
+@app.post("/goals/delete")
+async def goals_delete(body: Dict[str, Any], request: Request):
+    from executor.utils.goals import find_goal_by_title
+    sid = _session_id(request, ChatBody())
+    gid = body.get("goal_id"); title = body.get("title")
+    if gid:
+        delete_goal(int(gid)); return {"status": "ok", "message": f"Deleted goal #{gid}"}
+    if title:
+        g = find_goal_by_title(sid, title)
+        if g: delete_goal(g["id"]); return {"status": "ok", "message": f"Deleted goal “{g['title']}”"}
+        return {"status":"ok","message":"No goal matching that title was found."}
+    return {"status":"error","message":"Provide goal_id or title."}
+
+# Reminders polling
 @app.get("/check_reminders")
 def check_reminders():
     msgs = check_all_sessions()
     return {"count": len(msgs), "messages": msgs}
 
+# Helper — recent domain guess (for smart search & linkback in main)
+def _recent_domain_guess(session_id: str) -> Optional[str]:
+    turns = get_recent_turns(session_id or "default", limit=6)
+    for t in reversed(turns):
+        s = (t.get("text") or "").lower()
+        if any(k in s for k in ("food","pizza","recipe","restaurant","chili","sushi")):
+            return "food"
+        if any(k in s for k in ("color","palette","hue","shade")):
+            return "color"
+        if any(k in s for k in ("layout","ui","interface","design")):
+            return "ui"
+    return None
+
+# Build LLM context (unchanged)
 def build_context_with_retrieval(query: str) -> list[dict[str, str]]:
     context: list[dict[str, str]] = []
     try:
         init_db_if_needed()
         context = recall_context(limit=8)
     except Exception as e:
-        print("[ContextRecallError]", e)
-        context = []
+        print("[ContextRecallError]", e); context = []
     try:
         facts = list_facts()
         if facts:
-            context.insert(0, {"role": "system", "content": f"Known facts: {json.dumps(facts)}"})
+            context.insert(0, {"role":"system","content": f"Known facts: {json.dumps(facts)}"})
     except Exception as e:
         print("[InjectFactsError]", e)
     try:
         summaries = retrieve_topic_summaries(query, k=3)
         if summaries:
-            context.insert(0, {"role": "system", "content": "\n".join(summaries)})
+            context.insert(0, {"role":"system","content":"\n".join(summaries)})
     except Exception as e:
         print("[VectorSummaryError]", e)
     try:
         refs = hierarchical_recall(query, k_vols=2, k_refs=3)
         if refs:
-            context.insert(0, {"role": "system", "content": "\n".join(refs)})
+            context.insert(0, {"role":"system","content":"\n".join(refs)})
     except Exception as e:
         print("[VectorRecallError]", e)
     return context
 
+# -------------------- Main chat --------------------
 @app.post("/chat")
 async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
-    try:
-        raw = await request.json()
-    except Exception:
-        raw = {}
+    try: raw = await request.json()
+    except Exception: raw = {}
     text = (body.text or raw.get("message") or raw.get("prompt") or raw.get("content") or "").strip()
-    if not text:
-        return {"reply": "How can I help?"}
+    if not text: return {"reply": "How can I help?"}
 
     session_id = _session_id(request, body)
-    if body.set_intimacy is not None:
-        set_intimacy(session_id, body.set_intimacy)
+    if body.set_intimacy is not None: set_intimacy(session_id, body.set_intimacy)
     intimacy_level = get_intimacy(session_id)
 
     add_turn("user", text, session_id=session_id)
@@ -140,74 +184,82 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
     m_topic = re.search(r"(?i)\b(let'?s\s+talk\s+about|switch\s+to|change\s+topic\s+to)\b(.+)$", text)
     if m_topic:
         topic = m_topic.group(2).strip(" .!?")
-        if topic:
-            set_topic(session_id, topic)
+        if topic: set_topic(session_id, topic)
 
     replies: list[str] = []
 
     for p in parsed_intents:
         intent = reason_about_context(p, text, session_id=session_id)
-        if isinstance(intent, dict) and intent.get("reply"):
+
+        if isinstance(intent, dict) and intent.get("reply") and intent.get("intent") in {
+            "nudge","goal.create","goal.close","goal.resume","goal.switch","goal.deadline"
+        }:
             replies.append(intent["reply"])
+            if intent.get("intent") in {"goal.create","goal.close","goal.resume","goal.switch","goal.deadline"}:
+                final_reply = " ".join(r for r in replies if r).strip()
+                add_turn("assistant", final_reply, session_id)
+                return {"reply": final_reply}
             continue
 
-        if not isinstance(intent, dict):
-            replies.append("I’m not sure how to handle that request yet.")
-            continue
+        if not isinstance(intent, dict) or "intent" not in intent:
+            if isinstance(intent, dict) and "reply" in intent:
+                replies.append(intent["reply"]); continue
+            replies.append("I’m not sure how to handle that request right now."); continue
 
         if intent.get("intent") == "reflective.question" or (intent.get("intimacy", 0) > intimacy_level):
-            replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?")
-            continue
+            replies.append("If you want me to go deeper here, I can ask a more personal question. Would you like that?"); continue
 
         if intent.get("intent") == "temporal.recall" and intent.get("reply"):
-            replies.append(intent["reply"])
-            continue
+            replies.append(intent["reply"]); continue
 
-        if intent.get("intent") == "goal.suggest":
-            replies.append(intent["reply"])
-            continue
+        if intent["intent"] == "location.query" and intent.get("scope") and intent.get("key"):
+            node = gmem.get_node("location", intent["key"], scope=intent["scope"])
+            if intent["key"] == "home":
+                replies.append(f"You live in {node['value']}." if node else "I'm not sure where you live.")
+            elif intent["key"] == "current":
+                replies.append(f"You're currently in {node['value']}." if node else "I'm not sure where you are right now.")
+            else:
+                replies.append(f"Your trip destination is {node['value']}." if node else "I don't have a trip destination yet.")
+            set_last_fact(session_id, "location", intent["key"]); continue
 
-        if intent.get("intent") == "fact.query" and intent.get("key"):
+        if intent["intent"].startswith("fact.query") and intent.get("key"):
             domain = intent.get("domain") or gmem.detect_domain_from_key(intent["key"])
             node = gmem.get_node(domain, intent["key"], scope="global")
             replies.append(
                 f"Your {intent['key']} is {node['value']}."
-                if node and node.get("value")
-                else f"I’m not sure about your {intent['key']}. Tell me and I’ll remember it."
-            )
-            continue
+                if node and node.get("value") else
+                f"I’m not sure about your {intent['key']}. Tell me and I’ll remember it."
+            ); set_last_fact(session_id, domain, intent["key"]); continue
 
         if intent.get("intent") == "preference.query":
             qdom = intent.get("domain") or gmem.detect_domain_from_key(intent.get("key") or "")
-            likes = [p["item"] for p in get_preferences(qdom, min_strength=0.0) if p["polarity"] > 0]
-            dislikes = [p["item"] for p in get_dislikes(qdom)]
-            if likes or dislikes:
-                summary = []
-                if likes: summary.append(f"you like {', '.join(sorted(set(likes)))}")
-                if dislikes: summary.append(f"you don’t like {', '.join(sorted(set(dislikes)))}")
-                replies.append("Based on what you’ve shared, " + " and ".join(summary) + ".")
+            if qdom:
+                likes = [p["item"] for p in get_preferences(qdom, min_strength=0.0) if p["polarity"] > 0]  # type: ignore
+                dislikes = [p["item"] for p in get_dislikes(qdom)]
+                parts = []
+                if likes: parts.append(f"you like {', '.join(sorted(set(likes)))}")
+                if dislikes: parts.append(f"you don’t like {', '.join(sorted(set(dislikes)))}")
+                replies.append("Based on what you’ve shared, " + " and ".join(parts) + "." if parts else
+                               f"I don’t have much data on your {qdom} preferences yet.")
             else:
-                replies.append(f"I don’t have much data on your {qdom} preferences yet.")
+                replies.append("Tell me the category (e.g., foods, layouts) and I’ll check.")
             continue
 
-        if intent.get("intent") == "preference.statement" and intent.get("key"):
-            item = intent["key"]
-            polarity = +1 if intent.get("polarity") == 1 else -1
+        if intent["intent"] == "preference.statement" and intent.get("key"):
+            item = intent["key"]; polarity = +1 if intent.get("polarity") == 1 else -1
             try:
                 domain = intent.get("domain") or gmem.detect_domain_from_key(item)
                 record_preference(domain, item, polarity=polarity, strength=0.8, source="parser")
             except Exception as e:
                 print("[PreferenceWriteError]", e)
-            replies.append(f"Noted — you {('like' if polarity > 0 else 'don’t like')} {item}.")
-            continue
+            replies.append(f"Noted — you {('like' if polarity > 0 else 'don’t like')} {item}."); continue
 
-    # fallback → route + LLM
+    # Router/LLM fallback with smart search wrapper
     if not replies:
         try:
             router_output = route(text)
         except Exception as e:
-            print("[RouterError]", e)
-            return {"reply": f"Router error: {e}"}
+            print("[RouterError]", e); return {"reply": f"Router error: {e}"}
 
         actions = router_output.get("actions", [])
         if not actions:
@@ -216,32 +268,45 @@ async def chat(body: ChatBody, request: Request) -> Dict[str, Any]:
                 reply = brain_chat(context_block)
             except Exception as e:
                 reply = f"(brain offline) {e}"
-            add_turn("assistant", reply, session_id)
-            return {"reply": reply}
+            add_turn("assistant", reply, session_id); return {"reply": reply}
 
-        action = actions[0]
-        plugin = action.get("plugin")
-        args = action.get("args", {})
+        action = actions[0]; plugin = action.get("plugin"); args = action.get("args", {}) or {}
         try:
-            if plugin == "web_search": result = web_search.handle(args)
-            elif plugin == "weather_plugin": result = weather_plugin.handle(args)
-            elif plugin == "google_places": result = google_places.handle(args)
-            elif plugin == "feedback": result = feedback.handle(args)
-            else: result = {"status": "ok", "summary": router_output.get("assistant_message", "Okay.")}
-            summary = result.get("summary") or ""
+            # Smart search reasoner: contextualize query when appropriate
+            if plugin == "web_search":
+                domain_hint = _recent_domain_guess(session_id)
+                q = args.get("query") or text
+                if domain_hint == "food":
+                    q = f"{q} recipe or information"
+                args["query"] = q
+                result = web_search.handle(args)
+                summary = result.get("summary") or ""
+                # wrap summary in a conversational preamble
+                if domain_hint == "food":
+                    pre = "That sounds tasty! Here’s what I found:\n"
+                    summary = pre + summary if summary else pre + "(no results)"
+            elif plugin == "weather_plugin":
+                result = weather_plugin.handle(args); summary = result.get("summary") or ""
+            elif plugin == "google_places":
+                result = google_places.handle(args); summary = result.get("summary") or ""
+            elif plugin == "feedback":
+                result = feedback.handle(args); summary = result.get("summary") or ""
+            else:
+                result = {"status":"ok","summary": router_output.get("assistant_message", "Okay.")}
+                summary = result.get("summary") or ""
+
             if len(summary.strip()) < 40:
                 context_block = build_context_with_retrieval(text)
-                reply = brain_chat(
-                    f"{text}\n\nPlugin output:\n{summary}\n\nRespond conversationally.",
-                    context=context_block,
-                )
-                add_turn("assistant", reply, session_id)
-                return {"reply": reply}
-            add_turn("assistant", summary, session_id)
-            return {"reply": summary}
+                try:
+                    reply = brain_chat(
+                        f"{text}\n\nPlugin output:\n{summary}\n\nRespond conversationally.",
+                        context=context_block,
+                    ); add_turn("assistant", reply, session_id); return {"reply": reply}
+                except Exception as e:
+                    print("[ReflectionError]", e)
+            add_turn("assistant", summary, session_id); return {"reply": summary}
         except Exception as e:
-            print("[PluginError]", e)
-            return {"reply": f"Plugin error ({plugin}): {e}"}
+            print("[PluginError]", e); return {"reply": f"Plugin error ({plugin}): {e}"}
 
     final_reply = " ".join(r for r in replies if r).strip()
     add_turn("assistant", final_reply, session_id)
