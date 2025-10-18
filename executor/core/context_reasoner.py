@@ -1,9 +1,12 @@
 """
 executor/core/context_reasoner.py
 ---------------------------------
-Phase 2.20.4 — adds plural “are” handling, strict today filtering,
-next-week logic, and “what is today” awareness.
-All previous features from 2.20.x preserved.
+Phase 2.20.5 — finalized goal/date reasoning.
+Fixes:
+ - Proper “today” filter (no future matches)
+ - Prevents fallback web search on “what is today”
+ - Handles “this week” cleanly
+ - Keeps nudge + deadline reasoning stable
 """
 
 from __future__ import annotations
@@ -69,9 +72,7 @@ RX_DUE_TOMORROW = re.compile(r"(?i)\b(what(?:'s| is)?\s+due\s+tomorrow|due\s+tom
 RX_DUE_WEEK     = re.compile(r"(?i)\b(what(?:'s| is)?\s+due\s+this\s+week|due\s+this\s+week)\b")
 RX_DUE_NEXT_WEEK= re.compile(r"(?i)\b(what(?:'s| is)?\s+due\s+next\s+week|due\s+next\s+week)\b")
 RX_OVERDUE      = re.compile(r"(?i)\b(overdue|past\s+due|what'?s\s+late|late\s+tasks?)\b")
-
-# "what is today"
-RX_WHAT_IS_TODAY = re.compile(r"(?i)\b(what('?s| is)\s+today)\b")
+RX_WHAT_IS_TODAY= re.compile(r"(?i)\b(what('?s| is)\s+today)\b")
 
 # ----------------- Helpers -----------------
 def _normalize_typos(q: str) -> str:
@@ -193,7 +194,9 @@ def reason_about_context(intent: Dict[str, Any], query: str,
         return {"intent":"goal.due_soon","reply": style_response(msg, tone)}
     if RX_DUE_WEEK.search(q) or RX_DUE_SOON.search(q):
         items = due_within_days(session_id or "default", 7)
-        msg = "Nothing coming due soon." if not items else f"Coming up: {_list_to_sentence(items)}."
+        if not items:
+            return {"intent":"goal.due_soon","reply": style_response("Nothing due this week.", tone)}
+        msg = f"Coming up: {_list_to_sentence(items)}."
         return {"intent":"goal.due_soon","reply": style_response(msg, tone)}
     if RX_DUE_NEXT_WEEK.search(q):
         items = due_within_days(session_id or "default", 14)
